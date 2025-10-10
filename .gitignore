@@ -1,0 +1,23 @@
+# Apify storage
+apify_storage/
+storage/
+
+# Node modules
+node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
