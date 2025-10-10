@@ -5,12 +5,12 @@
 // ============================================================================
 
 import { Actor } from 'apify';
-import { GotCrawler, createGotRouter, Dataset, log } from 'crawlee';
+import { CheerioCrawler, createCheerioRouter, Dataset, log } from 'crawlee';
 
 // ============================================================================
 // ROUTER SETUP
 // ============================================================================
-export const router = createGotRouter();
+export const router = createCheerioRouter();
 
 // ============================================================================
 // GLOBAL STATE & COUNTERS
@@ -727,7 +727,7 @@ const maxConcurrency = input.maxConcurrency ?? 30; // Optimized for HTTP request
 // GOTCRAWLER SETUP - OPTIMIZED FOR SPEED
 // ============================================================================
 
-const crawler = new GotCrawler({
+const crawler = new CheerioCrawler({
     proxyConfiguration,
     requestHandler: router,
     
