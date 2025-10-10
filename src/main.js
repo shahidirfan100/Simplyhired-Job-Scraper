@@ -727,49 +727,48 @@ const maxConcurrency = input.maxConcurrency ?? 30; // Optimized for HTTP request
 // GOTCRAWLER SETUP - OPTIMIZED FOR SPEED
 // ============================================================================
 
+
 const crawler = new CheerioCrawler({
     proxyConfiguration,
     requestHandler: router,
-    
-    // MAXIMUM PERFORMANCE settings for HTTP-based scraping
     maxConcurrency: maxConcurrency,
     maxRequestsPerCrawl: Math.min(maxJobs * 5, 3000),
-    maxRequestRetries: 3, // Allow retries for proxy/network issues
+    maxRequestRetries: 3,
     requestHandlerTimeoutSecs: 60,
-    
-    // Session pool for better performance and anti-blocking
     useSessionPool: true,
     persistCookiesPerSession: true,
-    
     sessionPoolOptions: {
         maxPoolSize: Math.max(20, maxConcurrency * 2),
         sessionOptions: {
-            maxUsageCount: 20, // Reuse sessions more
+            maxUsageCount: 20,
             maxErrorScore: 2,
-            maxAgeSecs: 1800, // 30 minutes session lifetime
+            maxAgeSecs: 1800,
         },
     },
-    
-    // Enhanced headers to mimic real browser behavior
-    requestHandlerDefaults: {
-        headers: {
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'accept-language': 'en-US,en;q=0.9',
-            'accept-encoding': 'gzip, deflate, br',
-            'cache-control': 'no-cache',
-            'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'sec-fetch-dest': 'document',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'none',
-            'sec-fetch-user': '?1',
-            'upgrade-insecure-requests': '1',
-            'user-agent': randomUA(),
+    preNavigationHooks: [
+        async ({ request, session }) => {
+            // Rotate user-agent per session
+            if (!session.userData.userAgent) {
+                session.userData.userAgent = randomUA();
+            }
+            request.headers = {
+                ...request.headers,
+                'user-agent': session.userData.userAgent,
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'accept-language': 'en-US,en;q=0.9',
+                'accept-encoding': 'gzip, deflate, br',
+                'cache-control': 'no-cache',
+                'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-fetch-dest': 'document',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-site': 'none',
+                'sec-fetch-user': '?1',
+                'upgrade-insecure-requests': '1',
+            };
         },
-    },
-
-    // Error handling
+    ],
     failedRequestHandler: async ({ request, error }) => {
         log.error(`❌ Request failed: ${request.url}`, {
             error: error?.message,
