@@ -1,7 +1,7 @@
 // src/main.js
 // ============================================================================
 // SIMPLYHIRED JOB SCRAPER - COMPREHENSIVE APIFY ACTOR
-// HTTP-based scraping with GotCrawler for maximum speed and efficiency
+// HTTP-based scraping with CheerioCrawler for maximum speed and efficiency
 // ============================================================================
 
 import { Actor } from 'apify';
@@ -61,98 +61,81 @@ router.addDefaultHandler(async ({ $, enqueueLinks, request, crawler }) => {
     log.info(`📋 Scraping listing page ${pagesProcessed}: ${request.url}`);
 
     // ========================================================================
-    // ENHANCED JOB EXTRACTION - Multiple selector strategies
+    // ENHANCED JOB EXTRACTION - Updated for SimplyHired's current structure
     // ========================================================================
     const jobs = [];
     
-    // STRATEGY 1: Use data-testid selectors (SimplyHired's primary structure)
-    let jobCards = $('[data-testid="searchSerpJob"]');
+    // NEW STRATEGY: SimplyHired 2025 structure - jobs are in h2 > a elements
+    // Each job card is within an article or div containing h2 > a[href*="/job/"]
     
-    // STRATEGY 2: Fallback to generic job containers
-    if (jobCards.length === 0) {
-        jobCards = $('div[data-testid="job"]');
-    }
+    const jobLinks = $('h2 > a[href*="/job/"]');
     
-    // STRATEGY 3: Find all job links and get their parent containers
-    if (jobCards.length === 0) {
-        const jobLinks = $('a[href*="/job/"]');
-        const parentSet = new Set();
-        
-        jobLinks.each((_, link) => {
-            const $link = $(link);
-            // Find closest article or job-related container
-            let parent = $link.closest('article');
-            if (!parent.length) parent = $link.closest('div[class*="job"]');
-            if (!parent.length) parent = $link.closest('div[class*="card"]');
-            
-            if (parent.length) {
-                parentSet.add(parent.get(0));
-            }
-        });
-        
-        jobCards = $(Array.from(parentSet));
-    }
-
-    // Parse each job card
-    jobCards.each((_, element) => {
-        const card = $(element);
+    log.info(`Found ${jobLinks.length} job links on the page`);
+    
+    jobLinks.each((_, element) => {
+        const titleLink = $(element);
         
         try {
-            // FIND TITLE & LINK - multiple strategies
-            let titleLink = card.find('a[data-testid="job-link"]');
-            if (!titleLink.length) titleLink = card.find('a[href*="/job/"]').first();
-            if (!titleLink.length) titleLink = card.find('h2 a, h3 a, a[class*="jobTitle"]').first();
-            
-            if (!titleLink.length) return;
-
-            const title = (
-                titleLink.attr('aria-label') ||
-                titleLink.text() ||
-                ''
-            ).trim();
-            
+            // Get title from the link text
+            const title = titleLink.text().trim();
             const link = titleLink.attr('href');
+            
+            if (!title || !link) return;
+            
+            // Find the parent container (article, section, or div)
+            let container = titleLink.closest('article');
+            if (!container.length) container = titleLink.closest('section');
+            if (!container.length) container = titleLink.closest('div');
+            
+            // Extract company - usually text before/after the title
+            let company = '';
+            // Try to find company name in the container (usually plain text or in a span/div)
+            const companyText = container.find('*').filter(function() {
+                return $(this).children().length === 0 && $(this).text().trim().length > 0;
+            });
+            companyText.each((_, el) => {
+                const text = $(el).text().trim();
+                // Company name is usually after title, not a date/time, not salary
+                if (text && 
+                    text !== title && 
+                    !text.match(/^\d+[dhm]$/i) && 
+                    !text.match(/ago$/i) &&
+                    !text.match(/^\$[\d,]+/)) {
+                    if (!company) company = text;
+                }
+            });
+            
+            // Extract location - usually has city/state format or "Remote"
+            let location = '';
+            container.find('*').each((_, el) => {
+                const text = $(el).text().trim();
+                if (text.match(/^[A-Z][a-z]+,\s*[A-Z]{2}$/i) || text === 'Remote' || text.match(/—.*$/)) {
+                    location = text.replace(/—/g, '').trim();
+                    return false;
+                }
+            });
+            
+            // Extract summary - longer text content in the container
+            let summary = '';
+            container.find('p, div').each((_, el) => {
+                const text = $(el).text().trim();
+                if (text.length > 50 && text !== title) {
+                    summary = text;
+                    return false;
+                }
+            });
+            
+            // Extract salary - contains dollar sign and numbers
+            let salary = '';
+            container.find('*').each((_, el) => {
+                const text = $(el).text().trim();
+                if (text.match(/\$[\d,]+/)) {
+                    salary = text;
+                    return false;
+                }
+            });
 
-            // COMPANY - multiple selectors
-            const company = (
-                card.find('[data-testid="companyName"]').text() ||
-                card.find('span[data-testid]').text() ||
-                card.find('[class*="company-name"]').text() ||
-                card.find('[class*="companyName"]').text() ||
-                card.find('.SerpJob-company').text() ||
-                ''
-            ).trim();
-
-            // LOCATION - multiple selectors
-            const location = (
-                card.find('[data-testid="searchSerpJobLocation"]').text() ||
-                card.find('[data-testid="job-location"]').text() ||
-                card.find('[class*="location"]').text() ||
-                card.find('.SerpJob-location').text() ||
-                ''
-            ).trim();
-
-            // SUMMARY - multiple selectors
-            const summary = (
-                card.find('[data-testid="searchSerpJobSnippet"]').text() ||
-                card.find('[data-testid="job-snippet"]').text() ||
-                card.find('p[class*="snippet"]').text() ||
-                card.find('.SerpJob-snippet').text() ||
-                card.find('.job-snippet').text() ||
-                ''
-            ).trim();
-
-            // SALARY (optional)
-            const salary = (
-                card.find('[data-testid="searchSerpJobSalary"]').text() ||
-                card.find('[class*="salary"]').text() ||
-                card.find('.SerpJob-salary').text() ||
-                ''
-            ).trim();
-
-            if (title && link) {
-                jobs.push({ title, link, company, location, summary, salary });
-            }
+            jobs.push({ title, link, company, location, summary, salary });
         } catch (err) {
             log.error('Error parsing job card:', err.message);
         }
@@ -194,77 +177,27 @@ router.addDefaultHandler(async ({ $, enqueueLinks, request, crawler }) => {
     }
 
     // ========================================================================
-    // ENHANCED PAGINATION DETECTION - 5 strategies
+    // PAGINATION DETECTION - Updated for SimplyHired 2025
     // ========================================================================
     let nextHref = null;
     
-    // STRATEGY 1: Find "Next" or "Next Page" text
-    const allLinks = $('a');
-    allLinks.each((_, link) => {
+    // Look for "Next page" link in pagination
+    const paginationLinks = $('a[href*="cursor="]');
+    paginationLinks.each((_, link) => {
         const $link = $(link);
         const text = $link.text().toLowerCase().trim();
-        if ((text === 'next' || text === 'next page' || text.includes('next')) && 
-            !$link.hasClass('disabled')) {
+        const ariaLabel = $link.attr('aria-label')?.toLowerCase() || '';
+        
+        if (text.includes('next') || ariaLabel.includes('next')) {
             nextHref = $link.attr('href');
             return false; // break
         }
     });
-
-    // STRATEGY 2: Aria-label
-    if (!nextHref) {
-        const ariaNext = $('a[aria-label*="Next"]');
-        if (ariaNext.length && !ariaNext.hasClass('disabled')) {
-            nextHref = ariaNext.attr('href');
-        }
-    }
-
-    // STRATEGY 3: Chakra UI specific (SimplyHired uses Chakra)
-    if (!nextHref) {
-        const chakraLinks = $('a.chakra-link');
-        chakraLinks.each((_, link) => {
-            const $link = $(link);
-            const text = $link.text();
-            if (text.includes('Next Page') || text.includes('Next')) {
-                nextHref = $link.attr('href');
-                return false;
-            }
-        });
-    }
-
-    // STRATEGY 4: Pagination container logic
-    if (!nextHref) {
-        const pagination = 
-            $('[data-testid*="pagination"]').first() ||
-            $('.pagination').first() ||
-            $('[class*="Pagination"]').first();
-        
-        if (pagination.length) {
-            const links = pagination.find('a');
-            const current = pagination.find('[aria-current="page"], .active, [class*="active"]').first();
-            
-            if (current.length) {
-                const currentIndex = links.index(current.get(0));
-                if (currentIndex >= 0 && currentIndex < links.length - 1) {
-                    const nextLink = links.eq(currentIndex + 1);
-                    if (!nextLink.hasClass('disabled')) {
-                        nextHref = nextLink.attr('href');
-                    }
-                }
-            }
-        }
-    }
-
-    // STRATEGY 5: Look for chevron/arrow icons
-    if (!nextHref) {
-        const icons = $('svg[class*="chevron-right"], svg[class*="arrow-right"]');
-        icons.each((_, icon) => {
-            const $icon = $(icon);
-            const link = $icon.closest('a');
-            if (link.length && !link.hasClass('disabled')) {
-                nextHref = link.attr('href');
-                return false;
-            }
-        });
+    
+    // Fallback: find any link with cursor parameter (pagination)
+    if (!nextHref && paginationLinks.length > 0) {
+        // Get the last pagination link (usually "next")
+        nextHref = paginationLinks.last().attr('href');
     }
 
     // Check if we should continue pagination
@@ -297,270 +230,120 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
     }
 
     // ========================================================================
-    // ENHANCED DETAIL EXTRACTION
+    // SIMPLIFIED DETAIL EXTRACTION - Updated for SimplyHired 2025
     // ========================================================================
     
-    // Get the page body
     const body = $('body');
-
-    // -----------------------------------------------------------------------
-    // EXTRACT FULL DESCRIPTION - Advanced multi-strategy approach
-    // -----------------------------------------------------------------------
-    let description_text = '';
-    let description_html = '';
     
-    // STRATEGY 1: Look for main job description containers
-    const descriptionSelectors = [
-        '[data-testid="viewJobBodyJobFullDescription"]',
-        '[data-testid="viewJobBodyJobDescription"]',
-        '[data-testid="jobDescriptionSection"]',
-        'section[data-testid="jobDescription"]',
-        '.job-description-content',
-        '.ViewJob-description',
-        '.job-description'
-    ];
-
-    let descEl = null;
-    for (const selector of descriptionSelectors) {
-        const el = $(selector);
-        if (el.length) {
-            const text = el.text().trim();
-            const html = el.html();
-            
-            // Skip job details sections
-            if (text.match(/^(Job Details|Full-time|Part-time|\$[\d,]+)/i)) {
-                continue;
+    // Extract job title - usually in h1 or h2
+    const title = meta.title || 
+                  $('h1').first().text().trim() || 
+                  $('h2').first().text().trim() ||
+                  '';
+    
+    // Extract company - look for text patterns or company name
+    let company = meta.company || '';
+    if (!company) {
+        // Find company name (usually displayed prominently)
+        $('div, span, p').each((_, el) => {
+            const text = $(el).text().trim();
+            if (text && text.length < 100 && text.length > 2 && !text.includes('$') && !company) {
+                // Simple heuristic: company name is usually short and doesn't contain job-related keywords
+                if (!text.match(/ago|apply|job|full|part|time|posted|description|qualifications|responsibilities/i)) {
+                    company = text;
+                    return false;
+                }
             }
-            
-            // Skip qualifications sections
-            if (html && (html.includes('data-testid="viewJobQualificationItem"') || 
-                html.includes('Qualifications') ||
-                text.match(/^(Qualifications|Requirements|Skills Required)/i))) {
-                continue;
-            }
-            
-            // Must have substantial content
-            if (text.length > 100) {
-                descEl = el;
-                break;
-            }
-        }
+        });
     }
-
-    // STRATEGY 2: Find content between job details and qualifications
-    if (!descEl || descEl.length === 0) {
-        const jobDetailsContainer = $('[data-testid="viewJobBodyJobDetailsContainer"]');
-        const qualificationsTitles = $('[data-testid="viewJobDetailsSectionTitle"]');
-        
-        let qualificationsEl = null;
-        qualificationsTitles.each((_, el) => {
-            if ($(el).text().includes('Qualifications')) {
-                qualificationsEl = $(el);
+    
+    // Extract location
+    let location = meta.location || '';
+    if (!location) {
+        $('*').each((_, el) => {
+            const text = $(el).text().trim();
+            if (text.match(/^[A-Z][a-z]+,\s*[A-Z]{2}$/i) || text === 'Remote') {
+                location = text;
                 return false;
             }
         });
-        
-        if (jobDetailsContainer.length && qualificationsEl) {
-            // Find all siblings between these two elements
-            let current = jobDetailsContainer.parent().next();
-            const qualParent = qualificationsEl.parent();
-            
-            while (current.length && current.get(0) !== qualParent.get(0)) {
-                const text = current.text().trim();
-                const html = current.html();
-                
-                if (text.length > 200 && 
-                    html && !html.includes('data-testid="viewJobBodyJobDetailsContainer"') &&
-                    !html.includes('data-testid="viewJobQualificationItem"') &&
-                    !text.match(/^(Job Details|Qualifications|Full-time|Part-time|\$[\d,]+)/i)) {
-                    descEl = current;
-                    break;
-                }
-                current = current.next();
-            }
-        }
     }
-
-    // STRATEGY 3: Look for job description indicators
-    if (!descEl || descEl.length === 0) {
-        const allSections = $('div, section, article');
-        const jobDescIndicators = [
-            'job description', 'role', 'position', 'responsibilities', 'duties',
-            'we are looking', 'seeking', 'candidate will', 'you will',
-            'this position', 'job summary', 'overview', 'about the role',
-            'primary responsibilities', 'key responsibilities'
-        ];
-        
-        allSections.each((_, section) => {
-            const $section = $(section);
-            const text = $section.text().trim();
-            const html = $section.html();
-            
-            // Skip unwanted sections
-            if (text.length < 200 || 
-                html && (html.includes('data-testid="viewJobBodyJobDetailsContainer"') ||
-                html.includes('data-testid="viewJobQualificationItem"')) ||
-                $section.closest('[data-testid="viewJobBodyJobDetailsContainer"]').length) {
-                return;
-            }
-            
-            // Check for job description indicators
-            const lowerText = text.toLowerCase();
-            const hasIndicators = jobDescIndicators.some(indicator => 
-                lowerText.includes(indicator)
-            );
-            
-            if (hasIndicators) {
-                descEl = $section;
-                return false; // break
+    
+    // Extract salary - look for dollar signs
+    let salary = meta.salary || '';
+    if (!salary) {
+        $('*').each((_, el) => {
+            const text = $(el).text().trim();
+            if (text.match(/\$[\d,]+.*(?:hour|year|month)/i)) {
+                salary = text;
+                return false;
             }
         });
     }
-
-    // Clean and extract description
-    if (descEl && descEl.length) {
-        const cleanedEl = descEl.clone();
+    
+    // Extract employment type
+    let employment_type = '';
+    $('*').each((_, el) => {
+        const text = $(el).text().trim();
+        if (text.match(/^(Full-time|Part-time|Contract|Temporary|Internship|Freelance)$/i)) {
+            employment_type = text;
+            return false;
+        }
+    });
+    
+    // Extract posted date
+    let posted = '';
+    $('time').each((_, el) => {
+        posted = $(el).attr('datetime') || $(el).text().trim();
+        return false;
+    });
+    if (!posted) {
+        $('*').each((_, el) => {
+            const text = $(el).text().trim();
+            if (text.match(/\d+\s*(day|week|month|hour)s?\s*ago|yesterday|today/i)) {
+                posted = text;
+                return false;
+            }
+        });
+    }
+    
+    // Extract full description
+    let description_text = '';
+    let description_html = '';
+    
+    // Look for the main content area with job description
+    // Try to find sections with "description", "responsibilities", "qualifications", etc.
+    const mainContent = $('main, article, [role="main"], #content, .content, .job-description, .description').first();
+    
+    if (mainContent.length) {
+        // Clone and clean
+        const cleaned = mainContent.clone();
         
         // Remove unwanted elements
-        cleanedEl.find(`
-            [data-testid="viewJobBodyJobDetailsContainer"],
-            [data-testid="viewJobBodyJobDetailsJobType"],
-            [data-testid="viewJobBodyJobCompensation"],
-            [data-testid="viewJobBodyJobPostingTimestamp"],
-            [data-testid="viewJobQualificationItem"],
-            [data-testid="viewJobDetailsSectionTitle"],
-            .css-bu2sfw, .css-155za0w, .css-xyzzkl,
-            .chakra-wrap, .chakra-wrap__list,
-            svg, .svg-inline--fa, hr,
-            header, nav, footer, script, style
-        `).remove();
+        cleaned.find('header, nav, footer, script, style, .ad, .advertisement, .related-jobs, .similar-jobs').remove();
         
-        // Remove qualifications sections
-        cleanedEl.find('h2, h3, div').each((_, el) => {
-            const $el = $(el);
-            const text = $el.text().trim();
-            if (text.match(/^(Qualifications|Requirements|Skills Required|Skills & Qualifications)$/i)) {
-                const nextEl = $el.next();
-                if (nextEl.length && (nextEl.hasClass('chakra-wrap') || 
-                    nextEl.html() && nextEl.html().includes('data-testid="viewJobQualificationItem"'))) {
-                    nextEl.remove();
-                }
-                $el.remove();
-            }
-        });
-        
-        description_text = cleanedEl.text().trim();
-        description_html = cleanedEl.html() || '';
-        
-        // Final validation - ensure it's actually job description content
-        const lowerText = description_text.toLowerCase();
-        const isQualifications = description_text.match(/^(Job Details|Qualifications|Full-time|Part-time|\$[\d,]+.*(?:hour|year|month))/i) ||
-                                (lowerText.includes('microsoft word') && 
-                                 lowerText.includes('microsoft excel') && 
-                                 lowerText.includes('organizational skills') && 
-                                 description_text.length < 1000) ||
-                                description_text.length < 100;
-        
-        if (isQualifications) {
-            description_text = '';
-            description_html = '';
-        }
+        description_text = cleaned.text().trim();
+        description_html = cleaned.html() || '';
+    } else {
+        // Fallback: get all text from body, excluding common non-description sections
+        const bodyClone = body.clone();
+        bodyClone.find('header, nav, footer, script, style, .ad, .advertisement').remove();
+        description_text = bodyClone.text().trim();
+        description_html = bodyClone.html() || '';
     }
-
-    // -----------------------------------------------------------------------
-    // EXTRACT OTHER JOB DETAILS
-    // -----------------------------------------------------------------------
     
-    // COMPANY - multiple strategies
-    const company = 
-        body.find('[data-testid="viewJobCompanyName"]').first().text().trim() ||
-        body.find('[data-testid="companyName"]').first().text().trim() ||
-        body.find('h2[data-testid]').first().text().trim() ||
-        body.find('[class*="company-name"]').first().text().trim() ||
-        body.find('.ViewJobHeader-company').first().text().trim() ||
-        body.find('.JobPosting-company').first().text().trim() ||
-        '';
-
-    // LOCATION
-    const location = 
-        body.find('[data-testid="viewJobBodyJobLocation"]').first().text().trim() ||
-        body.find('[data-testid="job-location"]').first().text().trim() ||
-        body.find('.ViewJobHeader-location').first().text().trim() ||
-        body.find('.JobPosting-location').first().text().trim() ||
-        '';
-
-    // SALARY - extract from job details section
-    let salary = 
-        body.find('[data-testid="viewJobBodyJobCompensation"] [data-testid="detailText"]').first().text().trim() ||
-        body.find('[data-testid="viewJobBodyJobCompensation"]').first().text().trim() ||
-        body.find('[data-testid="job-salary"]').first().text().trim() ||
-        body.find('.ViewJob-salary').first().text().trim() ||
-        body.find('.JobPosting-salary').first().text().trim() ||
-        '';
-
-    // If still empty, look for salary patterns in job details container
-    if (!salary) {
-        const jobDetailsContainer = body.find('[data-testid="viewJobBodyJobDetailsContainer"]');
-        if (jobDetailsContainer.length) {
-            const detailsText = jobDetailsContainer.text();
-            const salaryMatch = detailsText.match(/\$[\d,]+(?:\.\d{2})?\s*-\s*\$[\d,]+(?:\.\d{2})?\s*(?:an?\s+)?(?:hour|year|month)/i);
-            if (salaryMatch) {
-                salary = salaryMatch[0];
-            }
-        }
-    }
-
-    // EMPLOYMENT TYPE - extract from job details section
-    let employment_type = 
-        body.find('[data-testid="viewJobBodyJobDetailsJobType"] [data-testid="detailText"]').first().text().trim() ||
-        body.find('[data-testid="viewJobBodyJobEmploymentType"]').first().text().trim() ||
-        body.find('[data-testid="employment-type"]').first().text().trim() ||
-        body.find('.JobPosting-employmentType').first().text().trim() ||
-        '';
-
-    // If still empty, look for employment type patterns
-    if (!employment_type) {
-        const jobDetailsContainer = body.find('[data-testid="viewJobBodyJobDetailsContainer"]');
-        if (jobDetailsContainer.length) {
-            const detailsText = jobDetailsContainer.text();
-            const employmentTypes = ['Full-time', 'Part-time', 'Contract', 'Temporary', 'Internship', 'Freelance'];
-            
-            for (const type of employmentTypes) {
-                if (detailsText.includes(type)) {
-                    employment_type = type;
-                    break;
-                }
-            }
-        }
-    }
-
-    // POSTED DATE
-    let posted = 
-        body.find('time').first().attr('datetime') ||
-        body.find('[data-testid="viewJobBodyJobPostingTimestamp"] [data-testid="detailText"]').first().text().trim() ||
-        body.find('[data-testid="viewJobBodyJobPostingDate"]').first().text().trim() ||
-        body.find('[data-testid="job-age"]').first().text().trim() ||
-        body.find('.ViewJobPost-date').first().text().trim() ||
-        '';
-
-    // If still empty, look for time patterns
-    if (!posted) {
-        const jobDetailsContainer = body.find('[data-testid="viewJobBodyJobDetailsContainer"]');
-        if (jobDetailsContainer.length) {
-            const detailsText = jobDetailsContainer.text();
-            const timeMatch = detailsText.match(/(?:Posted\s+)?(?:\d+\s+)?(?:day|days|week|weeks|month|months|hour|hours)\s+ago|yesterday|today/i);
-            if (timeMatch) {
-                posted = timeMatch[0];
-            }
-        }
-    }
+    // Clean up description text
+    description_text = description_text
+        .replace(/\s+/g, ' ')
+        .replace(/\n+/g, '\n')
+        .trim();
 
     // ========================================================================
     // BUILD & SAVE FINAL ITEM
     // ========================================================================
     
     const item = {
-        title: meta.title || body.find('h1').first().text().trim().replace(' - SimplyHired', '').slice(0, 200),
+        title: title.slice(0, 200),
         company: company || meta.company || '',
         location: location || meta.location || '',
         summary: meta.summary || '',
@@ -734,9 +517,14 @@ const crawler = new CheerioCrawler({
     maxConcurrency: maxConcurrency,
     maxRequestsPerCrawl: Math.min(maxJobs * 5, 3000),
     maxRequestRetries: 3,
-    requestHandlerTimeoutSecs: 60,
+    requestHandlerTimeoutSecs: 90,
     useSessionPool: true,
     persistCookiesPerSession: true,
+    
+    // Add delays between requests to avoid rate limiting
+    minConcurrency: 1,
+    maxConcurrencyPerSession: 1,
+    
     sessionPoolOptions: {
         maxPoolSize: Math.max(20, maxConcurrency * 2),
         sessionOptions: {
@@ -745,30 +533,39 @@ const crawler = new CheerioCrawler({
             maxAgeSecs: 1800,
         },
     },
+    
     preNavigationHooks: [
         async ({ request, session }) => {
             // Rotate user-agent per session
             if (!session.userData.userAgent) {
                 session.userData.userAgent = randomUA();
             }
+            
+            // Add realistic delay between requests (1-3 seconds)
+            const delay = 1000 + Math.random() * 2000;
+            await new Promise(resolve => setTimeout(resolve, delay));
+            
             request.headers = {
                 ...request.headers,
                 'user-agent': session.userData.userAgent,
-                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
                 'accept-language': 'en-US,en;q=0.9',
                 'accept-encoding': 'gzip, deflate, br',
-                'cache-control': 'no-cache',
+                'cache-control': 'max-age=0',
                 'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
                 'sec-ch-ua-mobile': '?0',
                 'sec-ch-ua-platform': '"Windows"',
                 'sec-fetch-dest': 'document',
                 'sec-fetch-mode': 'navigate',
-                'sec-fetch-site': 'none',
+                'sec-fetch-site': 'same-origin',
                 'sec-fetch-user': '?1',
                 'upgrade-insecure-requests': '1',
+                'referer': 'https://www.simplyhired.com/',
+                'origin': 'https://www.simplyhired.com',
             };
         },
     ],
+    
     failedRequestHandler: async ({ request, error }) => {
         log.error(`❌ Request failed: ${request.url}`, {
             error: error?.message,
@@ -799,7 +596,7 @@ try {
     log.info(`📄 Max pages per list: ${maxPages}`);
     log.info(`⚡ Concurrency: ${maxConcurrency}`);
     log.info(`🌐 Proxy: ${proxyInfo}`);
-    log.info(`🔧 HTTP-based scraping with GotCrawler & Cheerio`);
+    log.info(`🔧 HTTP-based scraping with CheerioCrawler & Cheerio`);
     log.info('='.repeat(80));
     
     await crawler.run(startUrls);
