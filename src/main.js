@@ -507,7 +507,7 @@ const maxPages = input.maxPagesPerList ?? 20;
 const maxConcurrency = input.maxConcurrency ?? 30; // Optimized for HTTP requests
 
 // ============================================================================
-// GOTCRAWLER SETUP - OPTIMIZED FOR SPEED
+// CHEERIO CRAWLER SETUP - OPTIMIZED FOR SPEED & ANTI-BLOCKING
 // ============================================================================
 
 
@@ -521,9 +521,8 @@ const crawler = new CheerioCrawler({
     useSessionPool: true,
     persistCookiesPerSession: true,
     
-    // Add delays between requests to avoid rate limiting
+    // Reduce concurrency to avoid rate limiting
     minConcurrency: 1,
-    maxConcurrencyPerSession: 1,
     
     sessionPoolOptions: {
         maxPoolSize: Math.max(20, maxConcurrency * 2),
