@@ -150,6 +150,11 @@ router.addDefaultHandler(async ({ $, enqueueLinks, request, crawler }) => {
                 }
             });
             
+            // Remove rating from company name (e.g., "Company Name - 4.4" -> "Company Name")
+            if (company) {
+                company = company.replace(/\s*[-–—]\s*\d+(\.\d+)?\s*$/, '').trim();
+            }
+            
             // Extract location - usually has city/state format or "Remote"
             let location = '';
             container.find('*').each((_, el) => {
@@ -349,6 +354,11 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
         }
     }
     
+    // Remove rating from company name (e.g., "Company Name - 4.4" -> "Company Name")
+    if (company) {
+        company = company.replace(/\s*[-–—]\s*\d+(\.\d+)?\s*$/, '').trim();
+    }
+    
     // Location
     let location = meta.location || cleanText($('[data-testid="viewJobCompanyLocation"]')) || '';
     
@@ -388,9 +398,12 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
         }
     });
     
-    // Qualifications - extract from list
+    // Qualifications - extract from list (limit to top 15 most important)
     const qualifications = [];
-    $('[data-testid="viewJobQualificationItem"]').each((_, el) => {
+    $('[data-testid="viewJobQualificationItem"]').each((i, el) => {
+        // Only get first 15 qualifications to avoid overwhelming data
+        if (i >= 15) return false;
+        
         const qual = cleanText($(el));
         if (qual && !qual.includes('css-') && !qual.includes('var(--')) {
             qualifications.push(qual);
