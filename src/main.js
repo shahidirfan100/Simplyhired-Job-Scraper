@@ -130,16 +130,22 @@ router.addDefaultHandler(async ({ $, enqueueLinks, request, crawler }) => {
             let company = '';
             // Try to find company name in the container (usually plain text or in a span/div)
             const companyText = container.find('*').filter(function() {
-                return $(this).children().length === 0 && $(this).text().trim().length > 0;
+                const $el = $(this);
+                // Only get leaf elements (no children) with text
+                return $el.children().length === 0 && $el.text().trim().length > 0;
             });
             companyText.each((_, el) => {
                 const text = $(el).text().trim();
-                // Company name is usually after title, not a date/time, not salary
+                // Company name is usually after title, not a date/time, not salary, not CSS
                 if (text && 
                     text !== title && 
                     !text.match(/^\d+[dhm]$/i) && 
                     !text.match(/ago$/i) &&
-                    !text.match(/^\$[\d,]+/)) {
+                    !text.match(/^\$[\d,]+/) &&
+                    !text.includes('css-') &&
+                    !text.includes('chakra-') &&
+                    !text.includes('var(--') &&
+                    text.length < 100) {
                     if (!company) company = text;
                 }
             });
@@ -272,154 +278,183 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
     }
 
     // ========================================================================
-    // SIMPLIFIED DETAIL EXTRACTION - Updated for SimplyHired 2025
+    // CLEAN TEXT & HTML EXTRACTION HELPERS
     // ========================================================================
     
-    const body = $('body');
+    // Helper to get clean text - removes CSS classes and HTML tags
+    const cleanText = (element) => {
+        if (!element || !element.length) return '';
+        
+        let text = element.text().trim();
+        
+        // Remove CSS class patterns like .css-xxxxx{...} and chakra-xxx{...}
+        text = text.replace(/\.(css-[a-z0-9-]+|chakra-[a-z0-9-]+)\{[^}]*\}/gi, '');
+        text = text.replace(/var\(--[^)]+\)/gi, '');
+        text = text.replace(/\{[^}]*\}/g, '');
+        text = text.replace(/font-size:|font-weight:|line-height:|margin-bottom:/gi, '');
+        
+        // Clean up whitespace
+        text = text.replace(/\s+/g, ' ').trim();
+        
+        return text;
+    };
     
-    // Extract job title - usually in h1 or h2
+    // Helper to get clean HTML - keeps structure but removes CSS classes
+    const cleanHtml = (element) => {
+        if (!element || !element.length) return '';
+        
+        // Clone to avoid modifying original
+        const clone = element.clone();
+        
+        // Remove style tags and CSS-related attributes
+        clone.find('style').remove();
+        clone.find('[class*="css-"]').removeAttr('class');
+        clone.find('[class*="chakra-"]').removeAttr('class');
+        clone.find('*').removeAttr('style');
+        clone.find('svg').remove(); // Remove icons
+        
+        // Get HTML and clean up CSS patterns
+        let html = clone.html() || '';
+        html = html.replace(/\.(css-[a-z0-9-]+|chakra-[a-z0-9-]+)\{[^}]*\}/gi, '');
+        html = html.replace(/var\(--[^)]+\)/gi, '');
+        
+        return html.trim();
+    };
+
+    // ========================================================================
+    // EXTRACT JOB DATA - Using data-testid attributes for SimplyHired
+    // ========================================================================
+    
+    // Title - from meta or h1
     const title = meta.title || 
-                  $('h1').first().text().trim() || 
-                  $('h2').first().text().trim() ||
+                  cleanText($('h1[data-testid="viewJobBodyJobHeader"]')) ||
+                  cleanText($('h1').first()) ||
                   '';
     
-    // Extract company - look for text patterns or company name
+    // Company name - look for company text that doesn't contain CSS
     let company = meta.company || '';
     if (!company) {
-        // Find company name (usually displayed prominently)
-        $('div, span, p').each((_, el) => {
-            const text = $(el).text().trim();
-            if (text && text.length < 100 && text.length > 2 && !text.includes('$') && !company) {
-                // Simple heuristic: company name is usually short and doesn't contain job-related keywords
-                if (!text.match(/ago|apply|job|full|part|time|posted|description|qualifications|responsibilities/i)) {
+        // Try specific selectors first
+        company = cleanText($('[data-testid="viewJobCompanyName"]'));
+        
+        // Fallback: find company in h2 or specific class (but filter out CSS)
+        if (!company) {
+            $('h2, .company-name, [class*="company"]').each((_, el) => {
+                const text = cleanText($(el));
+                if (text && !text.includes('css-') && !text.includes('var(--') && text.length < 100) {
                     company = text;
                     return false;
                 }
-            }
-        });
+            });
+        }
     }
     
-    // Extract location
-    let location = meta.location || '';
-    if (!location) {
-        $('*').each((_, el) => {
-            const text = $(el).text().trim();
-            if (text.match(/^[A-Z][a-z]+,\s*[A-Z]{2}$/i) || text === 'Remote') {
-                location = text;
-                return false;
-            }
-        });
+    // Location
+    let location = meta.location || cleanText($('[data-testid="viewJobCompanyLocation"]')) || '';
+    
+    // Salary - look for compensation with dollar signs
+    let salary = '';
+    const salaryEl = $('[data-testid="viewJobBodyJobCompensation"] [data-testid="detailText"]');
+    if (salaryEl.length) {
+        salary = cleanText(salaryEl);
+        // Decode HTML entities like &#x24; to $
+        salary = $('<div>').html(salary).text();
     }
     
-    // Extract salary - look for dollar signs
-    let salary = meta.salary || '';
+    // Fallback: search for any text with dollar amounts
     if (!salary) {
         $('*').each((_, el) => {
             const text = $(el).text().trim();
-            if (text.match(/\$[\d,]+.*(?:hour|year|month)/i)) {
-                salary = text;
+            if (text.match(/\$[\d,.]+ ?- ?\$[\d,.]+/) || text.match(/\$[\d,.]+\/(?:hour|year|hr)/)) {
+                salary = cleanText($(el));
+                salary = $('<div>').html(salary).text(); // Decode entities
                 return false;
             }
         });
     }
     
-    // Extract employment type
-    let employment_type = '';
-    $('*').each((_, el) => {
-        const text = $(el).text().trim();
-        if (text.match(/^(Full-time|Part-time|Contract|Temporary|Internship|Freelance)$/i)) {
-            employment_type = text;
-            return false;
+    // Job type (Full-time, Part-time, Contract, etc.)
+    const job_type = cleanText($('[data-testid="viewJobBodyJobDetailsJobType"] [data-testid="detailText"]')) || '';
+    
+    // Date posted
+    const date_posted = cleanText($('[data-testid="viewJobBodyJobPostingTimestamp"] [data-testid="detailText"]')) || '';
+    
+    // Benefits - extract from list
+    const benefits = [];
+    $('[data-testid="viewJobBenefitItem"]').each((_, el) => {
+        const benefit = cleanText($(el));
+        if (benefit && !benefit.includes('css-') && !benefit.includes('var(--')) {
+            benefits.push(benefit);
         }
     });
     
-    // Extract posted date
-    let posted = '';
-    $('time').each((_, el) => {
-        posted = $(el).attr('datetime') || $(el).text().trim();
-        return false;
+    // Qualifications - extract from list
+    const qualifications = [];
+    $('[data-testid="viewJobQualificationItem"]').each((_, el) => {
+        const qual = cleanText($(el));
+        if (qual && !qual.includes('css-') && !qual.includes('var(--')) {
+            qualifications.push(qual);
+        }
     });
-    if (!posted) {
-        $('*').each((_, el) => {
-            const text = $(el).text().trim();
-            if (text.match(/\d+\s*(day|week|month|hour)s?\s*ago|yesterday|today/i)) {
-                posted = text;
-                return false;
-            }
-        });
-    }
     
-    // Extract full description
+    // Full job description - the main content
     let description_text = '';
     let description_html = '';
     
-    // Look for the main content area with job description
-    // Try to find sections with "description", "responsibilities", "qualifications", etc.
-    const mainContent = $('main, article, [role="main"], #content, .content, .job-description, .description').first();
-    
-    if (mainContent.length) {
-        // Clone and clean
-        const cleaned = mainContent.clone();
+    const descContainer = $('[data-testid="viewJobBodyJobFullDescriptionContent"]');
+    if (descContainer.length) {
+        description_text = cleanText(descContainer);
+        description_html = cleanHtml(descContainer);
         
-        // Remove unwanted elements
-        cleaned.find('header, nav, footer, script, style, .ad, .advertisement, .related-jobs, .similar-jobs').remove();
-        
-        description_text = cleaned.text().trim();
-        description_html = cleaned.html() || '';
-    } else {
-        // Fallback: get all text from body, excluding common non-description sections
-        const bodyClone = body.clone();
-        bodyClone.find('header, nav, footer, script, style, .ad, .advertisement').remove();
-        description_text = bodyClone.text().trim();
-        description_html = bodyClone.html() || '';
+        // Decode HTML entities in description text
+        description_text = $('<div>').html(description_text).text();
     }
     
-    // Clean up description text
-    description_text = description_text
-        .replace(/\s+/g, ' ')
-        .replace(/\n+/g, '\n')
-        .trim();
+    // Fallback: try other common description containers
+    if (!description_text) {
+        const altDesc = $('.css-cxpe4v, .job-description, [class*="description"]').first();
+        if (altDesc.length) {
+            description_text = cleanText(altDesc);
+            description_html = cleanHtml(altDesc);
+            description_text = $('<div>').html(description_text).text();
+        }
+    }
 
     // ========================================================================
-    // BUILD & SAVE FINAL ITEM
+    // SAVE JOB DATA
     // ========================================================================
     
-    const item = {
-        title: title.slice(0, 200),
-        company: company || meta.company || '',
-        location: location || meta.location || '',
-        summary: meta.summary || '',
-        salary: salary || meta.salary || '',
-        employment_type: employment_type || '',
-        posted: posted || '',
+    const jobData = {
+        title: title || 'N/A',
+        company: company || 'N/A',
+        location: location || 'N/A',
+        salary: salary || 'N/A',
+        job_type: job_type || 'N/A',
+        date_posted: date_posted || 'N/A',
+        benefits: benefits.length > 0 ? benefits : null,
+        qualifications: qualifications.length > 0 ? qualifications : null,
         description_text: description_text || '',
         description_html: description_html || '',
-        url: request.loadedUrl || request.url,
-        crawledAt: new Date().toISOString(),
+        url: request.url,
+        source: 'SimplyHired',
+        scraped_at: new Date().toISOString(),
     };
 
-    try {
-        await Dataset.pushData(item);
-        savedJobs++;
-        
-        // Log progress every 10 jobs or when reaching target
-        if (savedJobs % 10 === 0 || savedJobs === maxJobs) {
-            log.info(`✅ Progress: ${savedJobs}/${maxJobs} jobs saved`);
-        }
+    log.info(`✅ Extracted: "${title}" at "${company}" | Salary: ${salary || 'N/A'}`);
+    
+    await Dataset.pushData(jobData);
+    savedJobs++;
+    jobsProcessed++;
+    
+    // Log progress
+    if (savedJobs % 10 === 0) {
+        log.info(`✅ Progress: ${savedJobs} jobs saved`);
+    }
 
-        // Check if we've reached target and terminate
-        if (savedJobs >= maxJobs && !crawlerTerminated) {
-            crawlerTerminated = true;
-            log.info(`🎯 Target reached! ${savedJobs} jobs collected. Terminating crawler...`);
-            try {
-                await crawler.teardown();
-            } catch (error) {
-                log.warning('Error during crawler teardown:', error.message);
-            }
-            return;
-        }
-    } catch (e) {
-        log.error('Failed to push to dataset:', e.message);
+    // Check if we've reached target
+    if (savedJobs >= maxJobs && !crawlerTerminated) {
+        crawlerTerminated = true;
+        log.info(`🎯 Target reached! ${savedJobs} jobs collected.`);
     }
 });
 
@@ -581,7 +616,8 @@ const randomUA = () => userAgents[Math.floor(Math.random() * userAgents.length)]
 
 const maxJobs = input.results_wanted ?? 200;
 const maxPages = input.maxPagesPerList ?? 20;
-const maxConcurrency = input.maxConcurrency ?? 30; // Optimized for HTTP requests
+// REDUCED concurrency to avoid 403 errors - SimplyHired is sensitive
+const maxConcurrency = Math.min(input.maxConcurrency ?? 10, 10); // Max 10 concurrent requests
 
 // ============================================================================
 // CHEERIO CRAWLER SETUP - OPTIMIZED FOR SPEED & ANTI-BLOCKING
@@ -617,10 +653,17 @@ const crawler = new CheerioCrawler({
                 session.userData.userAgent = randomUA();
             }
             
-            // REDUCED DELAY - Only add small delay to avoid looking like a bot
-            // The session pool and proxy rotation already help with anti-blocking
-            const delay = 200 + Math.random() * 300; // 200-500ms instead of 1-3 seconds
+            // MINIMAL DELAY - For detail pages, we need to be gentle
+            // List pages can be faster, but detail pages need more care
+            const isDetailPage = request.userData?.label === 'DETAIL';
+            const delay = isDetailPage 
+                ? 500 + Math.random() * 1000  // 500-1500ms for detail pages
+                : 100 + Math.random() * 200;  // 100-300ms for list pages
+            
             await new Promise(resolve => setTimeout(resolve, delay));
+            
+            // Set headers to look like a real browser
+            const isFromSameSite = request.userData?.label === 'DETAIL';
             
             request.headers = {
                 ...request.headers,
@@ -634,13 +677,13 @@ const crawler = new CheerioCrawler({
                 'sec-ch-ua-platform': '"Windows"',
                 'sec-fetch-dest': 'document',
                 'sec-fetch-mode': 'navigate',
-                'sec-fetch-site': 'same-origin',
+                'sec-fetch-site': isFromSameSite ? 'same-origin' : 'none',
                 'sec-fetch-user': '?1',
                 'upgrade-insecure-requests': '1',
-                'referer': 'https://www.simplyhired.com/',
+                'referer': isFromSameSite ? 'https://www.simplyhired.com/' : undefined,
             };
             
-            log.debug(`Request to: ${request.url}`);
+            log.debug(`Request to: ${request.url} (delay: ${Math.round(delay)}ms)`);
         },
     ],
     
