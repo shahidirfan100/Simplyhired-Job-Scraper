@@ -199,10 +199,11 @@ router.addDefaultHandler(async ({ $, enqueueLinks, request, crawler }) => {
     // ========================================================================
     // ENQUEUE DETAIL PAGES - Respect limits
     // ========================================================================
-    const remainingCapacity = Math.max(0, maxJobs - jobsProcessed);
+    const remainingCapacity = Math.max(0, maxJobs - savedJobs); // Use savedJobs instead of jobsProcessed
     const jobsToProcess = Math.min(jobs.length, remainingCapacity);
     
     if (remainingCapacity <= 0 || crawlerTerminated) {
+        log.info(`✋ Stopping: ${savedJobs}/${maxJobs} jobs already saved`);
         return;
     }
 
@@ -221,10 +222,8 @@ router.addDefaultHandler(async ({ $, enqueueLinks, request, crawler }) => {
     
     jobsProcessed += jobsToProcess;
     
-    // Log progress every 5 pages to reduce overhead
-    if (pagesProcessed % 5 === 1 || pagesProcessed === 1) {
-        log.info(`📤 Progress: ${jobsProcessed}/${maxJobs} jobs enqueued from ${pagesProcessed} pages`);
-    }
+    // Log progress with both enqueued and saved counts
+    log.info(`📤 Page ${pagesProcessed}: Enqueued ${jobsToProcess} jobs | Total enqueued: ${jobsProcessed} | Saved: ${savedJobs}/${maxJobs}`);
 
     // ========================================================================
     // PAGINATION DETECTION - Updated for SimplyHired 2025
@@ -364,21 +363,49 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
     
     // Salary - look for compensation with dollar signs
     let salary = '';
-    const salaryEl = $('[data-testid="viewJobBodyJobCompensation"] [data-testid="detailText"]');
+    
+    // First, try the specific selector
+    const salaryEl = $('[data-testid="viewJobBodyJobCompensation"]');
     if (salaryEl.length) {
-        salary = cleanText(salaryEl);
-        // Decode HTML entities like &#x24; to $
-        salary = $('<div>').html(salary).text();
+        // Get only the text content, not child elements
+        let salaryText = '';
+        salaryEl.find('[data-testid="detailText"]').each((_, el) => {
+            const text = $(el).text().trim();
+            // Only get text that contains dollar signs
+            if (text.includes('$') || text.match(/\d+.*(?:hour|year|month)/i)) {
+                salaryText = text;
+            }
+        });
+        
+        if (salaryText) {
+            salary = salaryText;
+            // Decode HTML entities like &#x24; to $
+            salary = $('<div>').html(salary).text();
+            // Remove any CSS leftovers
+            salary = salary.replace(/\.(css-[a-z0-9-]+|chakra-[a-z0-9-]+)\{[^}]*\}/gi, '');
+            salary = salary.replace(/var\(--[^)]+\)/gi, '');
+            salary = salary.trim();
+        }
     }
     
-    // Fallback: search for any text with dollar amounts
+    // Fallback: search for any text with dollar amounts (avoid CSS)
     if (!salary) {
         $('*').each((_, el) => {
-            const text = $(el).text().trim();
-            if (text.match(/\$[\d,.]+ ?- ?\$[\d,.]+/) || text.match(/\$[\d,.]+\/(?:hour|year|hr)/)) {
-                salary = cleanText($(el));
-                salary = $('<div>').html(salary).text(); // Decode entities
-                return false;
+            const $el = $(el);
+            // Skip elements with CSS class names
+            const className = $el.attr('class') || '';
+            if (className.includes('css-') || className.includes('chakra-')) {
+                return;
+            }
+            
+            const text = $el.text().trim();
+            if (text.match(/\$[\d,.]+ ?- ?\$[\d,.]+/) || text.match(/\$[\d,.]+\s*(?:per|\/|an?)\s*(?:hour|year|hr|month)/i)) {
+                // Make sure it's not too long (not a paragraph)
+                if (text.length < 50) {
+                    salary = text;
+                    salary = $('<div>').html(salary).text();
+                    return false;
+                }
             }
         });
     }
@@ -389,26 +416,28 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
     // Date posted
     const date_posted = cleanText($('[data-testid="viewJobBodyJobPostingTimestamp"] [data-testid="detailText"]')) || '';
     
-    // Benefits - extract from list
-    const benefits = [];
+    // Benefits - extract from list and combine into single string
+    const benefitsList = [];
     $('[data-testid="viewJobBenefitItem"]').each((_, el) => {
         const benefit = cleanText($(el));
         if (benefit && !benefit.includes('css-') && !benefit.includes('var(--')) {
-            benefits.push(benefit);
+            benefitsList.push(benefit);
         }
     });
+    const benefits = benefitsList.length > 0 ? benefitsList.join(', ') : '';
     
-    // Qualifications - extract from list (limit to top 15 most important)
-    const qualifications = [];
+    // Qualifications - extract from list and combine into single string (limit to top 15)
+    const qualificationsList = [];
     $('[data-testid="viewJobQualificationItem"]').each((i, el) => {
         // Only get first 15 qualifications to avoid overwhelming data
         if (i >= 15) return false;
         
         const qual = cleanText($(el));
         if (qual && !qual.includes('css-') && !qual.includes('var(--')) {
-            qualifications.push(qual);
+            qualificationsList.push(qual);
         }
     });
+    const qualifications = qualificationsList.length > 0 ? qualificationsList.join(', ') : '';
     
     // Full job description - the main content
     let description_text = '';
@@ -444,8 +473,8 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
         salary: salary || 'N/A',
         job_type: job_type || 'N/A',
         date_posted: date_posted || 'N/A',
-        benefits: benefits.length > 0 ? benefits : null,
-        qualifications: qualifications.length > 0 ? qualifications : null,
+        benefits: benefits || '',
+        qualifications: qualifications || '',
         description_text: description_text || '',
         description_html: description_html || '',
         url: request.url,
@@ -631,6 +660,8 @@ const maxJobs = input.results_wanted ?? 200;
 const maxPages = input.maxPagesPerList ?? 20;
 // REDUCED concurrency to avoid 403 errors - SimplyHired is sensitive
 const maxConcurrency = Math.min(input.maxConcurrency ?? 10, 10); // Max 10 concurrent requests
+
+log.info(`⚙️ Configuration: maxJobs=${maxJobs}, maxPages=${maxPages}, maxConcurrency=${maxConcurrency}`);
 
 // ============================================================================
 // CHEERIO CRAWLER SETUP - OPTIMIZED FOR SPEED & ANTI-BLOCKING
