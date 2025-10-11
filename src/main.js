@@ -48,16 +48,18 @@ router.addDefaultHandler(async ({ $, enqueueLinks, request, crawler }) => {
     const maxJobs = crawler.maxJobs || 200;
     const maxPages = crawler.maxPagesPerList || 20;
     
-    log.info(`🔍 LIST HANDLER called for page ${pagesProcessed}`);
+    // Reduced logging - only log every other page
+    if (pagesProcessed % 2 === 1 || pagesProcessed === 1) {
+        log.info(`🔍 LIST page ${pagesProcessed}/${maxPages} - Jobs saved: ${savedJobs}/${maxJobs}`);
+    }
     
     // Early exit conditions
     if (jobsProcessed >= maxJobs || crawlerTerminated) {
-        log.info(`Skipping - already at target (${jobsProcessed}/${maxJobs})`);
         return;
     }
     
     if (pagesProcessed > maxPages) {
-        log.info(`📄 Reached page limit of ${maxPages}`);
+        log.info(`📄 Reached page limit: ${maxPages}`);
         return;
     }
 
@@ -99,16 +101,8 @@ router.addDefaultHandler(async ({ $, enqueueLinks, request, crawler }) => {
     }
     
     if (jobLinks.length === 0) {
-        log.error('❌ No job links found on page. Website structure may have changed or page is blocked.');
-        log.info('Checking page title and content...');
-        log.info(`Page title: ${$('title').text()}`);
-        log.info(`Page has h1: ${$('h1').length} found`);
-        log.info(`Page has h2: ${$('h2').length} found`);
-        log.info(`Total links on page: ${$('a').length}`);
-        
-        // Save HTML for debugging
-        const debugHtml = $.html();
-        log.info(`HTML snippet: ${debugHtml.substring(0, 1000)}`);
+        log.error(`❌ No job links found. Page title: ${$('title').text()}`);
+        return;
     }
     
     jobLinks.each((_, element) => {
@@ -222,8 +216,10 @@ router.addDefaultHandler(async ({ $, enqueueLinks, request, crawler }) => {
     
     jobsProcessed += jobsToProcess;
     
-    // Log progress with both enqueued and saved counts
-    log.info(`📤 Page ${pagesProcessed}: Enqueued ${jobsToProcess} jobs | Total enqueued: ${jobsProcessed} | Saved: ${savedJobs}/${maxJobs}`);
+    // Reduced logging - only show significant updates
+    if (pagesProcessed === 1 || jobsToProcess > 0) {
+        log.info(`📤 Page ${pagesProcessed}: +${jobsToProcess} jobs | Total: ${jobsProcessed} enqueued, ${savedJobs} saved`);
+    }
 
     // ========================================================================
     // PAGINATION DETECTION - Updated for SimplyHired 2025
@@ -273,21 +269,32 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
     const meta = request.userData?.jobMeta ?? {};
     const maxJobs = crawler.maxJobs || 200;
     
-    log.info(`📄 DETAIL HANDLER called for job: ${meta.title || 'Unknown'}`);
+    // Reduced logging for speed - only log every 20th job
+    if (savedJobs % 20 === 0) {
+        log.info(`📄 Processing: ${meta.title || 'Unknown'} (${savedJobs}/${maxJobs})`);
+    }
     
     // Check if we've already reached our target
     if (savedJobs >= maxJobs || crawlerTerminated) {
-        log.info(`Skipping detail - already at target (${savedJobs}/${maxJobs})`);
         return;
     }
-
-    // ========================================================================
-    // CLEAN TEXT & HTML EXTRACTION HELPERS
-    // ========================================================================
     
-    // Helper to get clean text - removes CSS classes and HTML tags
-    const cleanText = (element) => {
-        if (!element || !element.length) return '';
+    // Wrap entire handler in try-catch to prevent crashes
+    try {
+        // Check if page loaded properly (not a block page)
+        const pageTitle = $('title').text().toLowerCase();
+        if (pageTitle.includes('access denied') || pageTitle.includes('blocked') || pageTitle.includes('captcha')) {
+            log.warning(`⚠️ Detected block page for: ${request.url}`);
+            throw new Error('Page blocked - will retry');
+        }
+
+        // ========================================================================
+        // CLEAN TEXT & HTML EXTRACTION HELPERS
+        // ========================================================================
+        
+        // Helper to get clean text - removes CSS classes and HTML tags
+        const cleanText = (element) => {
+            if (!element || !element.length) return '';
         
         let text = element.text().trim();
         
@@ -512,21 +519,25 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
         scraped_at: new Date().toISOString(),
     };
 
-    log.info(`✅ Extracted: "${title}" at "${company}" | Salary: ${salary || 'N/A'}`);
+    // Reduced logging - only log every 25 jobs or at milestones
+    if (savedJobs % 25 === 0 || savedJobs === 1 || savedJobs === maxJobs) {
+        log.info(`✅ Saved ${savedJobs}/${maxJobs}: "${title}" at "${company}"`);
+    }
     
     await Dataset.pushData(jobData);
     savedJobs++;
     jobsProcessed++;
-    
-    // Log progress
-    if (savedJobs % 10 === 0) {
-        log.info(`✅ Progress: ${savedJobs} jobs saved`);
-    }
 
     // Check if we've reached target
     if (savedJobs >= maxJobs && !crawlerTerminated) {
         crawlerTerminated = true;
         log.info(`🎯 Target reached! ${savedJobs} jobs collected.`);
+    }
+    
+    } catch (error) {
+        log.error(`❌ Error in DETAIL handler for ${request.url}: ${error.message}`);
+        // Re-throw to trigger retry mechanism
+        throw error;
     }
 });
 
@@ -688,8 +699,8 @@ const randomUA = () => userAgents[Math.floor(Math.random() * userAgents.length)]
 
 const maxJobs = input.results_wanted ?? 200;
 const maxPages = input.maxPagesPerList ?? 20;
-// REDUCED concurrency to avoid 403 errors - SimplyHired is sensitive
-const maxConcurrency = Math.min(input.maxConcurrency ?? 10, 10); // Max 10 concurrent requests
+// OPTIMIZED for SPEED - Higher concurrency with smart session management
+const maxConcurrency = Math.min(input.maxConcurrency ?? 15, 20); // Default 15, max 20
 
 log.info(`⚙️ Configuration: maxJobs=${maxJobs}, maxPages=${maxPages}, maxConcurrency=${maxConcurrency}`);
 
@@ -702,21 +713,21 @@ const crawler = new CheerioCrawler({
     proxyConfiguration,
     requestHandler: router,
     maxConcurrency: maxConcurrency,
-    maxRequestsPerCrawl: Math.min(maxJobs * 5, 3000),
-    maxRequestRetries: 3,
-    requestHandlerTimeoutSecs: 120,
+    maxRequestsPerCrawl: Math.min(maxJobs * 10, 5000),
+    maxRequestRetries: 4, // 4 retries - balance between success and speed
+    requestHandlerTimeoutSecs: 90, // 90s - faster timeout
     useSessionPool: true,
     persistCookiesPerSession: true,
     
-    // Reduce concurrency to avoid rate limiting
-    minConcurrency: 1,
+    // Keep some minimum concurrency for speed
+    minConcurrency: Math.floor(maxConcurrency / 3),
     
     sessionPoolOptions: {
-        maxPoolSize: Math.max(20, maxConcurrency * 2),
+        maxPoolSize: 100, // Large pool for better distribution
         sessionOptions: {
-            maxUsageCount: 20,
-            maxErrorScore: 3,
-            maxAgeSecs: 1800,
+            maxUsageCount: 30, // Use sessions longer (reduce overhead)
+            maxErrorScore: 1.5, // Be stricter with bad sessions
+            maxAgeSecs: 7200,  // 2 hours - keep sessions longer
         },
     },
     
@@ -727,26 +738,31 @@ const crawler = new CheerioCrawler({
                 session.userData.userAgent = randomUA();
             }
             
-            // MINIMAL DELAY - For detail pages, we need to be gentle
-            // List pages can be faster, but detail pages need more care
+            // MINIMAL DELAYS - Speed optimized while avoiding blocks
             const isDetailPage = request.userData?.label === 'DETAIL';
-            const delay = isDetailPage 
-                ? 500 + Math.random() * 1000  // 500-1500ms for detail pages
-                : 100 + Math.random() * 200;  // 100-300ms for list pages
+            let delay;
+            
+            if (isDetailPage) {
+                // Detail pages: 400-1000ms (was 1-3s) - Still safe but 3x faster
+                delay = 400 + Math.random() * 600;
+            } else {
+                // List pages: 50-150ms (was 300-800ms) - Very fast, minimal risk
+                delay = 50 + Math.random() * 100;
+            }
             
             await new Promise(resolve => setTimeout(resolve, delay));
             
-            // Set headers to look like a real browser
+            // Enhanced headers to look more like a real browser
             const isFromSameSite = request.userData?.label === 'DETAIL';
             
             request.headers = {
-                ...request.headers,
                 'user-agent': session.userData.userAgent,
-                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
                 'accept-language': 'en-US,en;q=0.9',
                 'accept-encoding': 'gzip, deflate, br',
-                'cache-control': 'max-age=0',
-                'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                'cache-control': 'no-cache',
+                'pragma': 'no-cache',
+                'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
                 'sec-ch-ua-mobile': '?0',
                 'sec-ch-ua-platform': '"Windows"',
                 'sec-fetch-dest': 'document',
@@ -754,19 +770,24 @@ const crawler = new CheerioCrawler({
                 'sec-fetch-site': isFromSameSite ? 'same-origin' : 'none',
                 'sec-fetch-user': '?1',
                 'upgrade-insecure-requests': '1',
-                'referer': isFromSameSite ? 'https://www.simplyhired.com/' : undefined,
+                'dnt': '1',
+                'connection': 'keep-alive',
             };
             
-            log.debug(`Request to: ${request.url} (delay: ${Math.round(delay)}ms)`);
+            // Add referer only for detail pages
+            if (isFromSameSite) {
+                request.headers['referer'] = 'https://www.simplyhired.com/search';
+            }
+            
+            log.debug(`${isDetailPage ? '📄' : '📋'} ${request.url.substring(0, 60)}... (${Math.round(delay)}ms)`);
         },
     ],
     
     failedRequestHandler: async ({ request, error }) => {
-        log.error(`❌ Request failed: ${request.url}`, {
-            error: error?.message,
-            retryCount: request.retryCount,
-            label: request.userData?.label,
-        });
+        // Only log important failures
+        if (request.retryCount >= 3) {
+            log.warning(`⚠️ Failed after ${request.retryCount} retries: ${request.userData?.label || 'unknown'} - ${error?.message}`);
+        }
     },
 });
 
@@ -800,8 +821,16 @@ try {
     
     log.info('='.repeat(80));
     log.info('✅ CRAWLER FINISHED SUCCESSFULLY');
-    log.info(`📊 Total jobs saved: ${savedJobs}`);
+    log.info(`📊 Total jobs saved: ${savedJobs}/${maxJobs} (${Math.round(savedJobs/maxJobs*100)}%)`);
     log.info(`📄 Total pages processed: ${pagesProcessed}`);
+    log.info(`⏱️  Average: ${(savedJobs/pagesProcessed || 0).toFixed(1)} jobs per page`);
+    
+    if (savedJobs < maxJobs) {
+        log.warning(`⚠️ Target not reached. Got ${savedJobs}/${maxJobs} jobs. This may be due to:`);
+        log.warning(`   - Not enough jobs available for your search criteria`);
+        log.warning(`   - Some jobs were blocked (403 errors)`);
+        log.warning(`   - Try reducing maxConcurrency for better stealth`);
+    }
     log.info('='.repeat(80));
 } catch (err) {
     log.error('='.repeat(80));

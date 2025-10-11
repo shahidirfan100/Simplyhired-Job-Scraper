@@ -66,10 +66,10 @@
     "maxConcurrency": {
       "title": "Concurrency",
       "type": "integer",
-      "description": "Number of parallel requests. Higher = faster but uses more resources. Recommended: 20-50 for HTTP scraping.",
+      "description": "Number of parallel requests. Higher = faster. Recommended: 10-20 for speed, 5-8 for maximum stealth.",
       "minimum": 1,
-      "maximum": 100,
-      "default": 30,
+      "maximum": 50,
+      "default": 15,
       "editor": "number"
     },
     "proxyConfiguration": {
