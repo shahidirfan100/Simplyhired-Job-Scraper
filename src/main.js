@@ -295,7 +295,13 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
         text = text.replace(/\.(css-[a-z0-9-]+|chakra-[a-z0-9-]+)\{[^}]*\}/gi, '');
         text = text.replace(/var\(--[^)]+\)/gi, '');
         text = text.replace(/\{[^}]*\}/g, '');
-        text = text.replace(/font-size:|font-weight:|line-height:|margin-bottom:/gi, '');
+        text = text.replace(/@media[^{]+\{[^}]*\}/gi, '');
+        text = text.replace(/font-size:|font-weight:|line-height:|margin-bottom:|color:|background:/gi, '');
+        text = text.replace(/:host|:root|\[data-theme\]|\.chakra-ui/gi, '');
+        
+        // Remove JSON-like structures
+        text = text.replace(/"[^"]*":\{[^}]*\}/g, '');
+        text = text.replace(/\{"[^"]*":/g, '');
         
         // Clean up whitespace
         text = text.replace(/\s+/g, ' ').trim();
@@ -303,26 +309,49 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
         return text;
     };
     
-    // Helper to get clean HTML - keeps structure but removes CSS classes
+    // Helper to get clean HTML - keeps structure but removes CSS classes and empty tags
     const cleanHtml = (element) => {
         if (!element || !element.length) return '';
         
         // Clone to avoid modifying original
         const clone = element.clone();
         
-        // Remove style tags and CSS-related attributes
-        clone.find('style').remove();
+        // Remove unwanted elements
+        clone.find('style, script, svg, img').remove();
         clone.find('[class*="css-"]').removeAttr('class');
         clone.find('[class*="chakra-"]').removeAttr('class');
-        clone.find('*').removeAttr('style');
-        clone.find('svg').remove(); // Remove icons
+        clone.find('*').removeAttr('style').removeAttr('id');
         
-        // Get HTML and clean up CSS patterns
+        // Remove data attributes
+        clone.find('*').each((_, el) => {
+            const $el = $(el);
+            const attrs = $el.get(0).attributes;
+            for (let i = attrs.length - 1; i >= 0; i--) {
+                const attrName = attrs[i].name;
+                if (attrName.startsWith('data-') || attrName.startsWith('aria-')) {
+                    $el.removeAttr(attrName);
+                }
+            }
+        });
+        
+        // Get HTML
         let html = clone.html() || '';
+        
+        // Remove CSS patterns from text
         html = html.replace(/\.(css-[a-z0-9-]+|chakra-[a-z0-9-]+)\{[^}]*\}/gi, '');
         html = html.replace(/var\(--[^)]+\)/gi, '');
+        html = html.replace(/@media[^{]+\{[^}]*\}/gi, '');
+        html = html.replace(/\{[^}]*\}/g, '');
         
-        return html.trim();
+        // Remove empty tags like <div></div>, <span></span>, <p></p>
+        html = html.replace(/<(\w+)[^>]*>\s*<\/\1>/gi, '');
+        // Do it twice to catch nested empty tags
+        html = html.replace(/<(\w+)[^>]*>\s*<\/\1>/gi, '');
+        
+        // Clean up excessive whitespace
+        html = html.replace(/\s+/g, ' ').trim();
+        
+        return html;
     };
 
     // ========================================================================
@@ -361,53 +390,54 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
     // Location
     let location = meta.location || cleanText($('[data-testid="viewJobCompanyLocation"]')) || '';
     
-    // Salary - look for compensation with dollar signs
+    // Salary - extract ONLY the salary text, not CSS or HTML
     let salary = '';
     
-    // First, try the specific selector
-    const salaryEl = $('[data-testid="viewJobBodyJobCompensation"]');
-    if (salaryEl.length) {
-        // Get only the text content, not child elements
-        let salaryText = '';
-        salaryEl.find('[data-testid="detailText"]').each((_, el) => {
-            const text = $(el).text().trim();
-            // Only get text that contains dollar signs
-            if (text.includes('$') || text.match(/\d+.*(?:hour|year|month)/i)) {
-                salaryText = text;
-            }
-        });
-        
-        if (salaryText) {
-            salary = salaryText;
-            // Decode HTML entities like &#x24; to $
-            salary = $('<div>').html(salary).text();
-            // Remove any CSS leftovers
-            salary = salary.replace(/\.(css-[a-z0-9-]+|chakra-[a-z0-9-]+)\{[^}]*\}/gi, '');
-            salary = salary.replace(/var\(--[^)]+\)/gi, '');
-            salary = salary.trim();
+    // Method 1: Try the specific data-testid selector
+    const salaryDetailText = $('[data-testid="viewJobBodyJobCompensation"] [data-testid="detailText"]');
+    if (salaryDetailText.length) {
+        const rawText = salaryDetailText.first().text().trim();
+        // Only accept if it looks like a salary (contains $ or numbers with period)
+        if (rawText.match(/\$|(\d+.*(?:hour|year|month|week))/i) && rawText.length < 100) {
+            salary = rawText;
         }
     }
     
-    // Fallback: search for any text with dollar amounts (avoid CSS)
+    // Method 2: Search for salary pattern in small text nodes
     if (!salary) {
-        $('*').each((_, el) => {
+        // Find elements that ONLY contain salary-like text (very short)
+        $('span, div, p').each((_, el) => {
             const $el = $(el);
-            // Skip elements with CSS class names
-            const className = $el.attr('class') || '';
-            if (className.includes('css-') || className.includes('chakra-')) {
-                return;
-            }
-            
             const text = $el.text().trim();
-            if (text.match(/\$[\d,.]+ ?- ?\$[\d,.]+/) || text.match(/\$[\d,.]+\s*(?:per|\/|an?)\s*(?:hour|year|hr|month)/i)) {
-                // Make sure it's not too long (not a paragraph)
-                if (text.length < 50) {
-                    salary = text;
-                    salary = $('<div>').html(salary).text();
-                    return false;
-                }
+            
+            // Skip if element has children or text is too long
+            if ($el.children().length > 1 || text.length > 80) return;
+            
+            // Look for salary patterns
+            if (text.match(/^\$[\d,.]+ ?- ?\$[\d,.]+\s*(?:per|an?|\/)\s*(?:hour|year|month|week|day)?$/i) ||
+                text.match(/^\$[\d,.]+\s*(?:per|an?|\/)\s*(?:hour|year|month|week|day)$/i)) {
+                salary = text;
+                return false; // Stop searching
             }
         });
+    }
+    
+    // Clean salary value
+    if (salary) {
+        // Decode HTML entities (&#x24; → $)
+        const tempDiv = $('<div>').html(salary);
+        salary = tempDiv.text().trim();
+        
+        // Remove any remaining CSS artifacts
+        salary = salary.replace(/\.(css-|chakra-)[\w-]+\{[^}]*\}/gi, '');
+        salary = salary.replace(/var\(--[^)]+\)/gi, '');
+        salary = salary.replace(/[{}]/g, '');
+        salary = salary.trim();
+        
+        // Final validation - if still contains weird characters, clear it
+        if (salary.length > 100 || salary.includes('{') || salary.includes('css-')) {
+            salary = '';
+        }
     }
     
     // Job type (Full-time, Part-time, Contract, etc.)
