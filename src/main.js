@@ -48,8 +48,11 @@ router.addDefaultHandler(async ({ $, enqueueLinks, request, crawler }) => {
     const maxJobs = crawler.maxJobs || 200;
     const maxPages = crawler.maxPagesPerList || 20;
     
+    log.info(`🔍 LIST HANDLER called for page ${pagesProcessed}`);
+    
     // Early exit conditions
     if (jobsProcessed >= maxJobs || crawlerTerminated) {
+        log.info(`Skipping - already at target (${jobsProcessed}/${maxJobs})`);
         return;
     }
     
@@ -60,6 +63,16 @@ router.addDefaultHandler(async ({ $, enqueueLinks, request, crawler }) => {
 
     log.info(`📋 Scraping listing page ${pagesProcessed}: ${request.url}`);
 
+    // Validate we got HTML content
+    const html = $.html();
+    if (!html || html.length < 1000) {
+        log.warning(`⚠️ Received very short or empty HTML response (${html?.length || 0} bytes)`);
+        log.warning(`Response preview: ${html?.substring(0, 500)}`);
+        return;
+    }
+    
+    log.info(`✓ Received HTML content: ${html.length} bytes`);
+
     // ========================================================================
     // ENHANCED JOB EXTRACTION - Updated for SimplyHired's current structure
     // ========================================================================
@@ -68,9 +81,35 @@ router.addDefaultHandler(async ({ $, enqueueLinks, request, crawler }) => {
     // NEW STRATEGY: SimplyHired 2025 structure - jobs are in h2 > a elements
     // Each job card is within an article or div containing h2 > a[href*="/job/"]
     
+    log.info('Looking for job links with selector: h2 > a[href*="/job/"]');
     const jobLinks = $('h2 > a[href*="/job/"]');
     
-    log.info(`Found ${jobLinks.length} job links on the page`);
+    log.info(`✓ Found ${jobLinks.length} job links on the page`);
+    
+    // ALTERNATIVE: Try finding just any link with /job/ in it
+    if (jobLinks.length === 0) {
+        log.warning('No h2 > a job links found, trying alternative selector: a[href*="/job/"]');
+        const altJobLinks = $('a[href*="/job/"]');
+        log.info(`Alternative selector found ${altJobLinks.length} links`);
+        
+        // Log first few links for debugging
+        altJobLinks.slice(0, 5).each((i, el) => {
+            log.info(`  Sample link ${i + 1}: ${$(el).attr('href')} - Text: ${$(el).text().trim().substring(0, 50)}`);
+        });
+    }
+    
+    if (jobLinks.length === 0) {
+        log.error('❌ No job links found on page. Website structure may have changed or page is blocked.');
+        log.info('Checking page title and content...');
+        log.info(`Page title: ${$('title').text()}`);
+        log.info(`Page has h1: ${$('h1').length} found`);
+        log.info(`Page has h2: ${$('h2').length} found`);
+        log.info(`Total links on page: ${$('a').length}`);
+        
+        // Save HTML for debugging
+        const debugHtml = $.html();
+        log.info(`HTML snippet: ${debugHtml.substring(0, 1000)}`);
+    }
     
     jobLinks.each((_, element) => {
         const titleLink = $(element);
@@ -224,8 +263,11 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
     const meta = request.userData?.jobMeta ?? {};
     const maxJobs = crawler.maxJobs || 200;
     
+    log.info(`📄 DETAIL HANDLER called for job: ${meta.title || 'Unknown'}`);
+    
     // Check if we've already reached our target
     if (savedJobs >= maxJobs || crawlerTerminated) {
+        log.info(`Skipping detail - already at target (${savedJobs}/${maxJobs})`);
         return;
     }
 
@@ -385,8 +427,13 @@ router.addHandler('DETAIL', async ({ $, request, crawler }) => {
 // MAIN ACTOR LOGIC
 // ============================================================================
 
+await Actor.init();
+
 // Get Actor input
 const input = (await Actor.getInput()) ?? {};
+
+log.info('Actor initialized');
+log.info(`Input received: ${JSON.stringify(input, null, 2)}`);
 
 // ============================================================================
 // SEARCH URL BUILDER
@@ -439,8 +486,17 @@ function buildSearchUrls(keywords, location, datePosted, remoteOnly) {
 let startUrls = [];
 
 if (input.startUrls && input.startUrls.length > 0) {
-    // Use user-provided URLs
-    startUrls = input.startUrls;
+    // User-provided URLs - handle both string array and object array formats
+    startUrls = input.startUrls.map(urlObj => {
+        if (typeof urlObj === 'string') {
+            return urlObj;
+        } else if (urlObj.url) {
+            return urlObj.url;
+        }
+        return null;
+    }).filter(url => url !== null);
+    
+    log.info(`Using ${startUrls.length} custom start URLs`);
 } else if (input.keywords || input.location || input.remote_only) {
     // Build URLs from search parameters
     startUrls = buildSearchUrls(
@@ -449,33 +505,54 @@ if (input.startUrls && input.startUrls.length > 0) {
         input.date_posted, 
         input.remote_only
     );
+    
+    log.info(`Built ${startUrls.length} search URLs from keywords/location`);
 } else {
     // Fallback to default search
     startUrls = ['https://www.simplyhired.com/search?q=software+engineer&l='];
+    log.info('Using default search URL');
 }
+
+// Validate startUrls
+if (!startUrls || startUrls.length === 0) {
+    throw new Error('No start URLs provided or generated. Please provide keywords, location, or custom URLs.');
+}
+
+log.info(`Start URLs: ${JSON.stringify(startUrls, null, 2)}`);
 
 // ============================================================================
 // PROXY CONFIGURATION
 // ============================================================================
 
 let proxyConfiguration;
-if (input.proxyConfiguration) {
-    // Use user-provided proxy configuration
-    const proxyConfig = input.proxyConfiguration;
-    
-    // If apifyProxyGroups is empty array, use RESIDENTIAL as default
-    if (proxyConfig.useApifyProxy && (!proxyConfig.apifyProxyGroups || proxyConfig.apifyProxyGroups.length === 0)) {
-        proxyConfig.apifyProxyGroups = ['RESIDENTIAL'];
+try {
+    if (input.proxyConfiguration) {
+        // Use user-provided proxy configuration
+        const proxyConfig = input.proxyConfiguration;
+        
+        log.info(`Proxy config received: ${JSON.stringify(proxyConfig)}`);
+        
+        // If apifyProxyGroups is empty array, use RESIDENTIAL as default
+        if (proxyConfig.useApifyProxy && (!proxyConfig.apifyProxyGroups || proxyConfig.apifyProxyGroups.length === 0)) {
+            proxyConfig.apifyProxyGroups = ['RESIDENTIAL'];
+        }
+        
+        proxyConfiguration = await Actor.createProxyConfiguration(proxyConfig);
+    } else {
+        // Default configuration with RESIDENTIAL proxies
+        log.info('No proxy config provided, using default RESIDENTIAL proxies');
+        proxyConfiguration = await Actor.createProxyConfiguration({
+            useApifyProxy: true,
+            groups: ['RESIDENTIAL'],
+            countryCode: 'US',
+        });
     }
     
-    proxyConfiguration = await Actor.createProxyConfiguration(proxyConfig);
-} else {
-    // Default configuration with RESIDENTIAL proxies
-    proxyConfiguration = await Actor.createProxyConfiguration({
-        useApifyProxy: true,
-        groups: ['RESIDENTIAL'],
-        countryCode: 'US',
-    });
+    log.info('Proxy configuration created successfully');
+} catch (error) {
+    log.error(`Error creating proxy configuration: ${error.message}`);
+    log.warning('Continuing without proxies - may result in blocking');
+    proxyConfiguration = await Actor.createProxyConfiguration();
 }
 
 // ============================================================================
@@ -517,7 +594,7 @@ const crawler = new CheerioCrawler({
     maxConcurrency: maxConcurrency,
     maxRequestsPerCrawl: Math.min(maxJobs * 5, 3000),
     maxRequestRetries: 3,
-    requestHandlerTimeoutSecs: 90,
+    requestHandlerTimeoutSecs: 120,
     useSessionPool: true,
     persistCookiesPerSession: true,
     
@@ -528,7 +605,7 @@ const crawler = new CheerioCrawler({
         maxPoolSize: Math.max(20, maxConcurrency * 2),
         sessionOptions: {
             maxUsageCount: 20,
-            maxErrorScore: 2,
+            maxErrorScore: 3,
             maxAgeSecs: 1800,
         },
     },
@@ -540,8 +617,9 @@ const crawler = new CheerioCrawler({
                 session.userData.userAgent = randomUA();
             }
             
-            // Add realistic delay between requests (1-3 seconds)
-            const delay = 1000 + Math.random() * 2000;
+            // REDUCED DELAY - Only add small delay to avoid looking like a bot
+            // The session pool and proxy rotation already help with anti-blocking
+            const delay = 200 + Math.random() * 300; // 200-500ms instead of 1-3 seconds
             await new Promise(resolve => setTimeout(resolve, delay));
             
             request.headers = {
@@ -560,8 +638,9 @@ const crawler = new CheerioCrawler({
                 'sec-fetch-user': '?1',
                 'upgrade-insecure-requests': '1',
                 'referer': 'https://www.simplyhired.com/',
-                'origin': 'https://www.simplyhired.com',
             };
+            
+            log.debug(`Request to: ${request.url}`);
         },
     ],
     
@@ -591,6 +670,7 @@ try {
     log.info('🚀 SIMPLYHIRED JOB SCRAPER - STARTING');
     log.info('='.repeat(80));
     log.info(`📍 Start URLs: ${startUrls.length}`);
+    startUrls.forEach((url, i) => log.info(`  ${i + 1}. ${url}`));
     log.info(`🎯 Target jobs: ${maxJobs}`);
     log.info(`📄 Max pages per list: ${maxPages}`);
     log.info(`⚡ Concurrency: ${maxConcurrency}`);
@@ -598,6 +678,7 @@ try {
     log.info(`🔧 HTTP-based scraping with CheerioCrawler & Cheerio`);
     log.info('='.repeat(80));
     
+    log.info('Starting crawler.run()...');
     await crawler.run(startUrls);
     
     log.info('='.repeat(80));
@@ -612,6 +693,10 @@ try {
     log.error(`Error: ${err.message}`);
     log.error(`Stack: ${err.stack}`);
     log.error('='.repeat(80));
+    
+    // Re-throw to mark the run as failed
+    throw err;
 } finally {
+    log.info('Calling Actor.exit()...');
     await Actor.exit();
 }
