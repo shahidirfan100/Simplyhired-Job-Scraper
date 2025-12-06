@@ -411,7 +411,6 @@ const crawler = new CheerioCrawler({
     maxRequestsPerCrawl: Math.min(maxJobs * 10, 5000),
     maxRequestRetries: 6,
     requestHandlerTimeoutSecs: 90,
-    useHttp2: true,
     useSessionPool: true,
     persistCookiesPerSession: true,
     sessionPoolOptions: {
