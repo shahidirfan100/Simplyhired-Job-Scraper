@@ -352,78 +352,98 @@ router.addDefaultHandler(async ({ request, response, session, body, enqueueLinks
 });
 
 router.addHandler('DETAIL', async ({ request, response, session, crawler, body, proxyInfo }) => {
-    let status = response?.statusCode;
-
     const meta = request.userData?.jobMeta || {};
     const maxJobs = crawler.maxJobs;
     if (savedJobs >= maxJobs) return;
 
-    let html = body?.toString?.() || '';
-    if (isBlockedStatus(status) || html.length < 800) {
-        const retry = request.retryCount || 0;
-        const backoff = Math.min(6000, 700 * Math.pow(2, retry)) + Math.random() * 500;
-        if (isBlockedStatus(status)) {
-            log.warning(`Detail blocked (${status}). Backing off ${Math.round(backoff)}ms and rotating session before refetch.`);
-            await sleep(backoff);
-            session.markBad();
-            session.retire();
+    try {
+        let status = response?.statusCode;
+        let html = body?.toString?.() || '';
+
+        if (isBlockedStatus(status) || html.length < 800) {
+            const retry = request.retryCount || 0;
+            const backoff = Math.min(6000, 700 * Math.pow(2, retry)) + Math.random() * 500;
+            if (isBlockedStatus(status)) {
+                log.warning(`Detail blocked (${status}). Backing off ${Math.round(backoff)}ms and rotating session before refetch.`);
+                await sleep(backoff);
+                session.markBad();
+                session.retire();
+            }
+            const refetch = await fetchWithGot(request.url, proxyInfo?.url, session.userData?.ua || randomUA());
+            status = refetch.statusCode;
+            html = refetch.body;
         }
-        const refetch = await fetchWithGot(request.url, proxyInfo?.url, session.userData?.ua || randomUA());
-        status = refetch.statusCode;
-        html = refetch.body;
-    }
 
-    if (isBlockedStatus(status)) {
-        throw new Error(`Blocked with status ${status} on detail page`);
-    }
+        if (isBlockedStatus(status)) {
+            throw new Error(`Blocked with status ${status} on detail page`);
+        }
 
-    const $page = loadHtml(html || '');
-    const ld = extractJobFromLdJson($page);
+        const $page = loadHtml(html || '');
+        const ld = extractJobFromLdJson($page);
 
-    let title = cleanText(ld.title || $page('h1').first().text() || meta.title);
-    let company = cleanText(ld.company || $page('[data-testid="viewJobCompanyName"]').first().text() || meta.company);
-    let location = cleanText(ld.location || $page('[data-testid="viewJobCompanyLocation"]').first().text() || meta.location);
-    let salary = cleanText(ld.salary || $page('[data-testid="viewJobBodyJobCompensation"] [data-testid="detailText"]').first().text() || meta.salary);
-    const job_type = cleanText($page('[data-testid="viewJobBodyJobDetailsJobType"] [data-testid="detailText"]').first().text());
-    const date_posted = cleanText(ld.date_posted || $page('[data-testid="viewJobBodyJobPostingTimestamp"] [data-testid="detailText"]').first().text());
+        let title = cleanText(ld.title || $page('h1').first().text() || meta.title);
+        let company = cleanText(ld.company || $page('[data-testid="viewJobCompanyName"]').first().text() || meta.company);
+        let location = cleanText(ld.location || $page('[data-testid="viewJobCompanyLocation"]').first().text() || meta.location);
+        let salary = cleanText(ld.salary || $page('[data-testid="viewJobBodyJobCompensation"] [data-testid="detailText"]').first().text() || meta.salary);
+        const job_type = cleanText($page('[data-testid="viewJobBodyJobDetailsJobType"] [data-testid="detailText"]').first().text());
+        const date_posted = cleanText(ld.date_posted || $page('[data-testid="viewJobBodyJobPostingTimestamp"] [data-testid="detailText"]').first().text());
 
-    const descContainer = $page('[data-testid="viewJobBodyJobFullDescriptionContent"]').first();
-    let description_html = ld.description_html || (descContainer.html() || '').trim();
-    let description_text = cleanText(ld.description_html ? loadHtml(ld.description_html).text() : descContainer.text());
+        const descContainer = $page('[data-testid="viewJobBodyJobFullDescriptionContent"]').first();
+        let description_html = ld.description_html || (descContainer.html() || '').trim();
+        let description_text = cleanText(ld.description_html ? loadHtml(ld.description_html).text() : descContainer.text());
 
-    // Fallbacks to avoid skipping saves
-    if (!title) title = cleanText(meta.title) || 'N/A';
-    if (!company) company = cleanText(meta.company) || 'N/A';
-    if (!location) location = cleanText(meta.location) || 'N/A';
-    if (!salary) salary = cleanText(meta.salary) || '';
-    if (!description_text) {
-        description_text = cleanText(description_html) || cleanText(meta.summary) || 'N/A';
-    }
-    if (!description_html) {
-        description_html = meta.summary || '';
-    }
+        // Fallbacks to avoid skipping saves
+        if (!title) title = cleanText(meta.title) || 'N/A';
+        if (!company) company = cleanText(meta.company) || 'N/A';
+        if (!location) location = cleanText(meta.location) || 'N/A';
+        if (!salary) salary = cleanText(meta.salary) || '';
+        if (!description_text) {
+            description_text = cleanText(description_html) || cleanText(meta.summary) || 'N/A';
+        }
+        if (!description_html) {
+            description_html = meta.summary || '';
+        }
 
-    const jobData = {
-        url: request.url,
-        title: title || 'N/A',
-        company: company || 'N/A',
-        location: location || 'N/A',
-        salary: salary || 'N/A',
-        job_type: job_type || 'N/A',
-        date_posted: date_posted || 'N/A',
-        description_text,
-        description_html,
-        benefits: '',
-        qualifications: '',
-        source: 'SimplyHired',
-        scraped_at: new Date().toISOString(),
-    };
+        const jobData = {
+            url: request.url,
+            title: title || 'N/A',
+            company: company || 'N/A',
+            location: location || 'N/A',
+            salary: salary || 'N/A',
+            job_type: job_type || 'N/A',
+            date_posted: date_posted || 'N/A',
+            description_text,
+            description_html,
+            benefits: '',
+            qualifications: '',
+            source: 'SimplyHired',
+            scraped_at: new Date().toISOString(),
+        };
 
-    await Dataset.pushData(jobData);
-    savedJobs += 1;
+        await Dataset.pushData(jobData);
+        savedJobs += 1;
 
-    if (savedJobs % 5 === 0 || savedJobs === 1) {
-        log.info(`Saved ${savedJobs}/${maxJobs}: ${title}`);
+        if (savedJobs % 5 === 0 || savedJobs === 1) {
+            log.info(`Saved ${savedJobs}/${maxJobs}: ${title}`);
+        }
+    } catch (err) {
+        // Last-resort: push meta-only so we do not end with empty dataset
+        log.warning(`Detail handler error for ${request.url}: ${err.message}. Pushing meta-only fallback.`);
+        const fallback = {
+            url: request.url,
+            title: cleanText(meta.title) || 'N/A',
+            company: cleanText(meta.company) || 'N/A',
+            location: cleanText(meta.location) || 'N/A',
+            salary: cleanText(meta.salary) || '',
+            job_type: meta.job_type || '',
+            date_posted: meta.date_posted || '',
+            description_text: cleanText(meta.summary) || 'N/A',
+            description_html: meta.summary || '',
+            source: 'SimplyHired',
+            scraped_at: new Date().toISOString(),
+        };
+        await Dataset.pushData(fallback);
+        savedJobs += 1;
     }
 });
 
