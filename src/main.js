@@ -219,8 +219,14 @@ const router = createCheerioRouter();
 router.addDefaultHandler(async ({ $, request, response, session, body, enqueueLinks, crawler }) => {
     pagesProcessed += 1;
     const maxJobs = crawler.maxJobs;
+    const maxPages = crawler.maxPagesPerList;
     const capacity = Math.max(0, maxJobs - savedJobs);
     const status = response?.statusCode;
+
+    if (pagesProcessed > maxPages) {
+        log.info(`Max pages reached (${maxPages}), skipping further pagination.`);
+        return;
+    }
 
     if (isBlockedStatus(status)) {
         session.markBad();
@@ -276,7 +282,7 @@ router.addDefaultHandler(async ({ $, request, response, session, body, enqueueLi
     log.info(`Enqueued ${requests.length} detail pages (total enqueued: ${enqueuedDetails})`);
 
     // Pagination
-    if (nextUrl && savedJobs < maxJobs) {
+    if (nextUrl && savedJobs < maxJobs && pagesProcessed < maxPages) {
         await enqueueLinks({ requests: [{ url: absolute(nextUrl), label: 'LIST', uniqueKey: absolute(nextUrl) }] });
         log.info(`Enqueued next listing page: ${absolute(nextUrl)}`);
     } else if (!nextUrl) {
@@ -387,7 +393,6 @@ const crawler = new CheerioCrawler({
     maxConcurrency,
     maxRequestsPerCrawl: Math.min(maxJobs * 10, 5000),
     maxRequestRetries: 3,
-    maxRequestsPerStartUrl: maxPages,
     requestHandlerTimeoutSecs: 90,
     useSessionPool: true,
     persistCookiesPerSession: true,
