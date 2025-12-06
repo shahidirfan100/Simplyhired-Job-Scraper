@@ -315,23 +315,36 @@ router.addDefaultHandler(async ({ request, response, session, body, enqueueLinks
         return;
     }
 
-    const requests = limitedJobs.map((job) => {
+    const jobUrls = limitedJobs.map((job) => {
         const url = absolute(job.link);
-        return {
-            url,
-            label: 'DETAIL',
-            uniqueKey: url,
-            userData: { jobMeta: job },
-        };
+        return { url, job };
     }).filter((r) => r.url);
 
-    await enqueueLinks({ requests });
-    enqueuedDetails += requests.length;
-    log.info(`Enqueued ${requests.length} detail pages (total enqueued: ${enqueuedDetails})`);
+    await enqueueLinks({
+        urls: jobUrls.map((r) => r.url),
+        label: 'DETAIL',
+        transformRequestFunction: (req) => {
+            // attach meta per matching url
+            const meta = jobUrls.find((r) => r.url === req.url)?.job;
+            req.userData = { jobMeta: meta };
+            req.uniqueKey = req.url;
+            return req;
+        },
+    });
+    enqueuedDetails += jobUrls.length;
+    log.info(`Enqueued ${jobUrls.length} detail pages (total enqueued: ${enqueuedDetails})`);
 
     // Pagination
     if (nextUrl && savedJobs < maxJobs && pagesProcessed < maxPages) {
-        await enqueueLinks({ requests: [{ url: absolute(nextUrl), label: 'LIST', uniqueKey: absolute(nextUrl) }] });
+        const next = absolute(nextUrl);
+        await enqueueLinks({
+            urls: [next],
+            label: 'LIST',
+            transformRequestFunction: (req) => {
+                req.uniqueKey = req.url;
+                return req;
+            },
+        });
         log.info(`Enqueued next listing page: ${absolute(nextUrl)}`);
     } else if (!nextUrl) {
         log.info('No next page detected.');
