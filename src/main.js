@@ -9,6 +9,7 @@ import {
     createCheerioRouter,
 } from 'crawlee';
 import { load as loadHtml } from 'cheerio';
+import { gotScraping } from 'got-scraping';
 
 // -----------------------------------------------------------------------------
 // Globals / counters
@@ -42,6 +43,35 @@ const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 const isBlockedStatus = (code) => code === 403 || code === 429;
 
 const cleanText = (text) => (text || '').replace(/\s+/g, ' ').trim();
+
+// Fetch with got-scraping using strong browser-like headers and http2 when available
+const fetchWithGot = async (url, proxyUrl, ua) => {
+    const res = await gotScraping({
+        url,
+        proxyUrl,
+        timeout: { request: 30000 },
+        retry: { limit: 0 },
+        headerGeneratorOptions: {
+            browsers: [{ name: 'chrome', minVersion: 120, httpVersion: '2' }],
+            devices: ['desktop'],
+            locales: ['en-US', 'en'],
+        },
+        headers: {
+            'user-agent': ua || randomUA(),
+            accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'accept-language': 'en-US,en;q=0.9',
+            'accept-encoding': 'gzip, deflate, br',
+            'sec-ch-ua-platform': '"Windows"',
+            'upgrade-insecure-requests': '1',
+            dnt: '1',
+            pragma: 'no-cache',
+            'cache-control': 'no-cache',
+        },
+        http2: true,
+        compression: true,
+    });
+    return { statusCode: res.statusCode, body: res.body?.toString?.() || res.body || '' };
+};
 
 // JSON-first list extraction
 const extractJobsFromJson = (html, currentUrl) => {
@@ -220,31 +250,41 @@ const buildSearchUrls = (keywords, location, datePosted, remoteOnly) => {
 // -----------------------------------------------------------------------------
 const router = createCheerioRouter();
 
-router.addDefaultHandler(async ({ $, request, response, session, body, enqueueLinks, crawler }) => {
+router.addDefaultHandler(async ({ request, response, session, body, enqueueLinks, crawler, proxyInfo }) => {
     pagesProcessed += 1;
     const maxJobs = crawler.maxJobs;
     const maxPages = crawler.maxPagesPerList;
     const capacity = Math.max(0, maxJobs - savedJobs);
-    const status = response?.statusCode;
+    let status = response?.statusCode;
 
     if (pagesProcessed > maxPages) {
         log.info(`Max pages reached (${maxPages}), skipping further pagination.`);
         return;
     }
 
-    if (isBlockedStatus(status)) {
+    let html = body?.toString?.() || '';
+    // If blocked or HTML suspiciously short, refetch with got-scraping (browser TLS + H2)
+    if (isBlockedStatus(status) || html.length < 800) {
         const retry = request.retryCount || 0;
         const backoff = Math.min(5000, 500 * Math.pow(2, retry)) + Math.random() * 400;
-        log.warning(`List blocked (${status}). Backing off ${Math.round(backoff)}ms and rotating session.`);
-        await sleep(backoff);
-        session.markBad();
-        session.retire();
+        if (isBlockedStatus(status)) {
+            log.warning(`List blocked (${status}). Backing off ${Math.round(backoff)}ms and rotating session before refetch.`);
+            await sleep(backoff);
+            session.markBad();
+            session.retire();
+        }
+        const refetch = await fetchWithGot(request.url, proxyInfo?.url, session.userData?.ua || randomUA());
+        status = refetch.statusCode;
+        html = refetch.body;
+    }
+
+    if (isBlockedStatus(status)) {
         throw new Error(`Blocked with status ${status} on list page`);
     }
 
     log.info(`LIST ${pagesProcessed}: ${request.url}`);
 
-    const html = body?.toString?.() || $.html() || '';
+    const $page = loadHtml(html || '');
     let jobs = [];
     let nextUrl = null;
 
@@ -258,7 +298,7 @@ router.addDefaultHandler(async ({ $, request, response, session, body, enqueueLi
 
     // Fallback to HTML
     if (!jobs.length) {
-        const htmlResult = extractJobsFromHtml($);
+        const htmlResult = extractJobsFromHtml($page);
         jobs = htmlResult.jobs;
         nextUrl = nextUrl || htmlResult.nextUrl;
         log.debug(`HTML list extraction: ${jobs.length} jobs`);
@@ -298,32 +338,43 @@ router.addDefaultHandler(async ({ $, request, response, session, body, enqueueLi
     }
 });
 
-router.addHandler('DETAIL', async ({ $, request, response, session, crawler }) => {
-    const status = response?.statusCode;
-    if (isBlockedStatus(status)) {
-        const retry = request.retryCount || 0;
-        const backoff = Math.min(6000, 700 * Math.pow(2, retry)) + Math.random() * 500;
-        log.warning(`Detail blocked (${status}). Backing off ${Math.round(backoff)}ms and rotating session.`);
-        await sleep(backoff);
-        session.markBad();
-        session.retire();
-        throw new Error(`Blocked with status ${status} on detail page`);
-    }
+router.addHandler('DETAIL', async ({ request, response, session, crawler, body, proxyInfo }) => {
+    let status = response?.statusCode;
 
     const meta = request.userData?.jobMeta || {};
     const maxJobs = crawler.maxJobs;
     if (savedJobs >= maxJobs) return;
 
-    const ld = extractJobFromLdJson($);
+    let html = body?.toString?.() || '';
+    if (isBlockedStatus(status) || html.length < 800) {
+        const retry = request.retryCount || 0;
+        const backoff = Math.min(6000, 700 * Math.pow(2, retry)) + Math.random() * 500;
+        if (isBlockedStatus(status)) {
+            log.warning(`Detail blocked (${status}). Backing off ${Math.round(backoff)}ms and rotating session before refetch.`);
+            await sleep(backoff);
+            session.markBad();
+            session.retire();
+        }
+        const refetch = await fetchWithGot(request.url, proxyInfo?.url, session.userData?.ua || randomUA());
+        status = refetch.statusCode;
+        html = refetch.body;
+    }
 
-    const title = cleanText(ld.title || $('h1').first().text() || meta.title);
-    const company = cleanText(ld.company || $('[data-testid="viewJobCompanyName"]').first().text() || meta.company);
-    const location = cleanText(ld.location || $('[data-testid="viewJobCompanyLocation"]').first().text() || meta.location);
-    const salary = cleanText(ld.salary || $('[data-testid="viewJobBodyJobCompensation"] [data-testid="detailText"]').first().text() || meta.salary);
-    const job_type = cleanText($('[data-testid="viewJobBodyJobDetailsJobType"] [data-testid="detailText"]').first().text());
-    const date_posted = cleanText(ld.date_posted || $('[data-testid="viewJobBodyJobPostingTimestamp"] [data-testid="detailText"]').first().text());
+    if (isBlockedStatus(status)) {
+        throw new Error(`Blocked with status ${status} on detail page`);
+    }
 
-    const descContainer = $('[data-testid="viewJobBodyJobFullDescriptionContent"]').first();
+    const $page = loadHtml(html || '');
+    const ld = extractJobFromLdJson($page);
+
+    const title = cleanText(ld.title || $page('h1').first().text() || meta.title);
+    const company = cleanText(ld.company || $page('[data-testid="viewJobCompanyName"]').first().text() || meta.company);
+    const location = cleanText(ld.location || $page('[data-testid="viewJobCompanyLocation"]').first().text() || meta.location);
+    const salary = cleanText(ld.salary || $page('[data-testid="viewJobBodyJobCompensation"] [data-testid="detailText"]').first().text() || meta.salary);
+    const job_type = cleanText($page('[data-testid="viewJobBodyJobDetailsJobType"] [data-testid="detailText"]').first().text());
+    const date_posted = cleanText(ld.date_posted || $page('[data-testid="viewJobBodyJobPostingTimestamp"] [data-testid="detailText"]').first().text());
+
+    const descContainer = $page('[data-testid="viewJobBodyJobFullDescriptionContent"]').first();
     const description_html = ld.description_html || (descContainer.html() || '').trim();
     const description_text = cleanText(ld.description_html ? loadHtml(ld.description_html).text() : descContainer.text());
 
