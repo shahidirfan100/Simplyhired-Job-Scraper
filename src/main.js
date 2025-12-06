@@ -28,12 +28,16 @@ const absolute = (href) => {
 };
 
 const userAgents = [
+    // Latest realistic desktop UAs (Dec 2025)
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0',
 ];
 const randomUA = () => userAgents[Math.floor(Math.random() * userAgents.length)];
+
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 const isBlockedStatus = (code) => code === 403 || code === 429;
 
@@ -229,6 +233,10 @@ router.addDefaultHandler(async ({ $, request, response, session, body, enqueueLi
     }
 
     if (isBlockedStatus(status)) {
+        const retry = request.retryCount || 0;
+        const backoff = Math.min(5000, 500 * Math.pow(2, retry)) + Math.random() * 400;
+        log.warning(`List blocked (${status}). Backing off ${Math.round(backoff)}ms and rotating session.`);
+        await sleep(backoff);
         session.markBad();
         session.retire();
         throw new Error(`Blocked with status ${status} on list page`);
@@ -293,6 +301,10 @@ router.addDefaultHandler(async ({ $, request, response, session, body, enqueueLi
 router.addHandler('DETAIL', async ({ $, request, response, session, crawler }) => {
     const status = response?.statusCode;
     if (isBlockedStatus(status)) {
+        const retry = request.retryCount || 0;
+        const backoff = Math.min(6000, 700 * Math.pow(2, retry)) + Math.random() * 500;
+        log.warning(`Detail blocked (${status}). Backing off ${Math.round(backoff)}ms and rotating session.`);
+        await sleep(backoff);
         session.markBad();
         session.retire();
         throw new Error(`Blocked with status ${status} on detail page`);
@@ -354,7 +366,7 @@ const input = (await Actor.getInput()) ?? {};
 
 const maxJobs = input.results_wanted ?? 200;
 const maxPages = input.maxPagesPerList ?? 20;
-const maxConcurrency = Math.min(input.maxConcurrency ?? 5, 20); // default lower to reduce blocks
+const maxConcurrency = Math.min(input.maxConcurrency ?? 3, 15); // default lower to reduce blocks
 
 // Start URLs
 let startUrls = [];
@@ -401,13 +413,14 @@ const crawler = new CheerioCrawler({
     ignoreHttpErrorStatusCodes: true, // let handler decide what to do on 4xx/5xx
     blockedStatusCodes: [], // do not auto-throw on 403/429; we manage sessions manually
     requestHandlerTimeoutSecs: 90,
+    useHttp2: true,
     useSessionPool: true,
     persistCookiesPerSession: true,
     sessionPoolOptions: {
         maxPoolSize: 80,
         sessionOptions: {
-            maxUsageCount: 20,
-            maxErrorScore: 1,
+            maxUsageCount: 8, // aggressive rotation
+            maxErrorScore: 0.5, // retire sooner
             maxAgeSecs: 3600,
         },
     },
@@ -416,22 +429,36 @@ const crawler = new CheerioCrawler({
         async ({ request, session }) => {
             if (!session.userData.ua) session.userData.ua = randomUA();
             const isDetail = request.userData?.label === 'DETAIL';
-            const delay = isDetail ? 250 + Math.random() * 400 : 120 + Math.random() * 180;
-            await new Promise((res) => setTimeout(res, delay));
+            // Human-like dwell time + network jitter
+            const dwell = isDetail ? 450 + Math.random() * 1200 : 220 + Math.random() * 700;
+            const latency = 80 + Math.random() * 200;
+            await sleep(dwell + latency);
+
+            // Derive consistent client hints from UA (Chrome-like)
+            const ua = session.userData.ua;
+            const chromeMatch = ua.match(/Chrome\/(\d+)/);
+            const chromeVer = chromeMatch ? chromeMatch[1] : '131';
+            const secChUa = `"Chromium";v="${chromeVer}", "Not_A Brand";v="24", "Google Chrome";v="${chromeVer}"`;
 
             request.headers = {
-                'user-agent': session.userData.ua,
+                'user-agent': ua,
                 accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
                 'accept-language': 'en-US,en;q=0.9',
                 'accept-encoding': 'gzip, deflate, br',
                 'cache-control': 'no-cache',
                 pragma: 'no-cache',
-                'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
+                'sec-ch-ua': secChUa,
                 'sec-ch-ua-mobile': '?0',
                 'sec-ch-ua-platform': '"Windows"',
+                'sec-ch-ua-platform-version': '"15.0.0"',
+                'sec-ch-ua-arch': '"x86"',
+                'sec-ch-ua-bitness': '"64"',
+                'sec-ch-ua-full-version': `"${chromeVer}.0.0.0"`,
+                'sec-ch-ua-full-version-list': secChUa.replace(/Chromium/, 'Google Chrome'),
                 'sec-fetch-dest': 'document',
                 'sec-fetch-mode': 'navigate',
                 'sec-fetch-site': isDetail ? 'same-origin' : 'none',
+                'sec-fetch-user': '?1',
                 'upgrade-insecure-requests': '1',
                 dnt: '1',
                 connection: 'keep-alive',
