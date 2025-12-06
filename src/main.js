@@ -85,7 +85,20 @@ const extractJobsFromJson = (html, currentUrl) => {
         const title = item.title || item.jobTitle || item.positionTitle;
         const company = item.company || item.companyName || item.hiringCompany || item.hiring_company?.name;
         const location = item.location || item.jobLocation || item.cityState || item.city_state || item.locationName;
-        const salary = item.salary || item.compensation || item.pay || item.compensationText;
+        const salaryObj = item.salary || item.compensation || item.pay || item.compensationText;
+        const salary =
+            typeof salaryObj === 'object'
+                ? cleanText(
+                      [
+                          salaryObj.min && `$${salaryObj.min}`,
+                          salaryObj.max && salaryObj.max !== salaryObj.min && `$${salaryObj.max}`,
+                          salaryObj.unit || salaryObj.currency,
+                      ]
+                          .filter(Boolean)
+                          .join(' '),
+                  )
+                : cleanText(salaryObj);
+        const job_type = item.employmentType || item.jobType || item.type;
         const summary = item.snippet || item.descriptionSnippet || item.shortDescription;
         const link = item.url || item.viewJobUrl || item.viewJobLink || item.jobUrl || item.jobLink || item.detailUrl;
         if (!title || !link) return null;
@@ -94,6 +107,7 @@ const extractJobsFromJson = (html, currentUrl) => {
             company: cleanText(company),
             location: cleanText(location),
             salary: cleanText(salary),
+            job_type: cleanText(job_type),
             summary: cleanText(summary),
             link,
         };
@@ -229,6 +243,121 @@ const extractJobFromLdJson = ($) => {
     return {};
 };
 
+// Direct internal API (best-effort) to speed up listing extraction
+const fetchSearchApi = async ({ q, l, page, pageSize = 40, proxyUrl, ua }) => {
+    try {
+        const res = await gotScraping({
+            url: 'https://www.simplyhired.com/api/jobs/search',
+            method: 'POST',
+            proxyUrl,
+            timeout: { request: 15000 },
+            retry: { limit: 0 },
+            headers: {
+                'user-agent': ua || randomUA(),
+                accept: 'application/json, text/plain, */*',
+                'content-type': 'application/json',
+                origin: 'https://www.simplyhired.com',
+                referer: 'https://www.simplyhired.com/',
+            },
+            json: {
+                q: q || '',
+                l: l || '',
+                page: page || 1,
+                pn: page || 1,
+                start: pageSize * Math.max(0, (page || 1) - 1),
+                limit: pageSize,
+                numJobs: pageSize,
+                job: '',
+            },
+            throwHttpErrors: false,
+            http2: true,
+        });
+
+        if (res.statusCode >= 400) return { jobs: [], nextUrl: null, blocked: isBlockedStatus(res.statusCode) };
+
+        const body = typeof res.body === 'string' ? res.body : res.body?.toString?.() || '';
+        let json;
+        try {
+            json = typeof res.body === 'object' ? res.body : JSON.parse(body);
+        } catch {
+            return { jobs: [], nextUrl: null, blocked: false };
+        }
+
+        const list =
+            json?.jobs ||
+            json?.results ||
+            json?.data?.jobs ||
+            json?.data?.results ||
+            json?.searchResults ||
+            [];
+
+        const jobs = Array.isArray(list)
+            ? list
+                  .map((item) => {
+                      const title = item.title || item.jobTitle || item.positionTitle;
+                      const company = item.company || item.companyName || item.hiringCompany || item.hiring_company?.name;
+                      const location =
+                          item.location ||
+                          item.jobLocation ||
+                          item.cityState ||
+                          item.city_state ||
+                          item.locationName ||
+                          [item.city, item.state].filter(Boolean).join(', ');
+                      const salaryObj = item.salary || item.compensation || item.pay || item.compensationText;
+                      const salary =
+                          typeof salaryObj === 'object'
+                              ? cleanText(
+                                    [
+                                        salaryObj.min && `$${salaryObj.min}`,
+                                        salaryObj.max &&
+                                            salaryObj.max !== salaryObj.min &&
+                                            `$${salaryObj.max}`,
+                                        salaryObj.unit || salaryObj.currency,
+                                    ]
+                                        .filter(Boolean)
+                                        .join(' '),
+                                )
+                              : cleanText(salaryObj);
+                      const job_type = item.employmentType || item.jobType || item.type;
+                      const date_posted = item.datePosted || item.publishDate || item.createdAt;
+                      const summary = item.snippet || item.descriptionSnippet || item.shortDescription;
+                      const link =
+                          item.url || item.viewJobUrl || item.viewJobLink || item.jobUrl || item.jobLink || item.detailUrl;
+                      if (!title || !link) return null;
+                      return {
+                          title: cleanText(title),
+                          company: cleanText(company),
+                          location: cleanText(location),
+                          salary: cleanText(salary),
+                          job_type: cleanText(job_type),
+                          date_posted: cleanText(date_posted),
+                          summary: cleanText(summary),
+                          link: absolute(link),
+                      };
+                  })
+                  .filter(Boolean)
+            : [];
+
+        let nextUrl = null;
+        const pagination = json?.pagination || json?.page || json?.data?.pagination;
+        const nextPage =
+            pagination?.nextPage ||
+            pagination?.next ||
+            (pagination?.totalPages && page < pagination.totalPages ? page + 1 : null);
+        if (nextPage) {
+            const u = new URL('https://www.simplyhired.com/search');
+            if (q) u.searchParams.set('q', q);
+            if (l) u.searchParams.set('l', l);
+            u.searchParams.set('pn', nextPage);
+            nextUrl = u.toString();
+        }
+
+        return { jobs, nextUrl, blocked: false };
+    } catch {
+        return { jobs: [], nextUrl: null, blocked: false };
+    }
+};
+
 const buildSearchUrls = (keywords, location, datePosted, remoteOnly) => {
     const baseUrl = 'https://www.simplyhired.com/search';
     const urls = [];
@@ -251,6 +380,8 @@ const buildSearchUrls = (keywords, location, datePosted, remoteOnly) => {
 const router = createCheerioRouter();
 
 router.addDefaultHandler(async ({ request, response, session, body, enqueueLinks, crawler, proxyInfo }) => {
+    // Safety: if somehow a DETAIL request lands here, let the DETAIL handler take it
+    if (request.label === 'DETAIL' || request.userData?.label === 'DETAIL') return;
     pagesProcessed += 1;
     const maxJobs = crawler.maxJobs;
     const maxPages = crawler.maxPagesPerList;
@@ -288,12 +419,32 @@ router.addDefaultHandler(async ({ request, response, session, body, enqueueLinks
     let jobs = [];
     let nextUrl = null;
 
+    // Try internal API first for speed and richer fields
+    const urlObj = new URL(request.url);
+    const qParam = urlObj.searchParams.get('q') || '';
+    const lParam = urlObj.searchParams.get('l') || '';
+    const pnParam = Number(urlObj.searchParams.get('pn') || urlObj.searchParams.get('page') || '1') || 1;
+    const apiResult = await fetchSearchApi({
+        q: qParam,
+        l: lParam,
+        page: pnParam,
+        proxyUrl: proxyInfo?.url,
+        ua: session.userData?.ua || randomUA(),
+    });
+    if (apiResult.jobs.length) {
+        jobs = apiResult.jobs;
+        nextUrl = apiResult.nextUrl;
+        log.debug(`API list extraction success: ${jobs.length} jobs`);
+    }
+
     // JSON-first
-    const jsonResult = extractJobsFromJson(html, request.url);
-    if (jsonResult.jobs.length) {
-        jobs = jsonResult.jobs;
-        nextUrl = jsonResult.nextUrl;
-        log.debug(`JSON list extraction success: ${jobs.length} jobs`);
+    if (!jobs.length) {
+        const jsonResult = extractJobsFromJson(html, request.url);
+        if (jsonResult.jobs.length) {
+            jobs = jsonResult.jobs;
+            nextUrl = nextUrl || jsonResult.nextUrl;
+            log.debug(`JSON list extraction success: ${jobs.length} jobs`);
+        }
     }
 
     // Fallback to HTML
@@ -326,7 +477,8 @@ router.addDefaultHandler(async ({ request, response, session, body, enqueueLinks
         transformRequestFunction: (req) => {
             // attach meta per matching url
             const meta = jobUrls.find((r) => r.url === req.url)?.job;
-            req.userData = { jobMeta: meta };
+            req.userData = { jobMeta: meta, label: 'DETAIL' };
+            req.label = 'DETAIL';
             req.uniqueKey = req.url;
             return req;
         },
@@ -341,6 +493,8 @@ router.addDefaultHandler(async ({ request, response, session, body, enqueueLinks
             urls: [next],
             label: 'LIST',
             transformRequestFunction: (req) => {
+                req.userData = { ...(req.userData || {}), label: 'LIST' };
+                req.label = 'LIST';
                 req.uniqueKey = req.url;
                 return req;
             },
@@ -369,10 +523,10 @@ router.addHandler('DETAIL', async ({ request, response, session, crawler, body, 
                 session.markBad();
                 session.retire();
             }
-            const refetch = await fetchWithGot(request.url, proxyInfo?.url, session.userData?.ua || randomUA());
-            status = refetch.statusCode;
-            html = refetch.body;
-        }
+        const refetch = await fetchWithGot(request.url, proxyInfo?.url, session.userData?.ua || randomUA());
+        status = refetch.statusCode;
+        html = refetch.body;
+    }
 
         if (isBlockedStatus(status)) {
             throw new Error(`Blocked with status ${status} on detail page`);
@@ -385,8 +539,16 @@ router.addHandler('DETAIL', async ({ request, response, session, crawler, body, 
         let company = cleanText(ld.company || $page('[data-testid="viewJobCompanyName"]').first().text() || meta.company);
         let location = cleanText(ld.location || $page('[data-testid="viewJobCompanyLocation"]').first().text() || meta.location);
         let salary = cleanText(ld.salary || $page('[data-testid="viewJobBodyJobCompensation"] [data-testid="detailText"]').first().text() || meta.salary);
-        const job_type = cleanText($page('[data-testid="viewJobBodyJobDetailsJobType"] [data-testid="detailText"]').first().text());
-        const date_posted = cleanText(ld.date_posted || $page('[data-testid="viewJobBodyJobPostingTimestamp"] [data-testid="detailText"]').first().text());
+        const job_type = cleanText(
+            meta.job_type ||
+                $page('[data-testid="viewJobBodyJobDetailsJobType"] [data-testid="detailText"]').first().text() ||
+                $page('[data-testid="job-type"]').first().text(),
+        );
+        const date_posted = cleanText(
+            ld.date_posted ||
+                meta.date_posted ||
+                $page('[data-testid="viewJobBodyJobPostingTimestamp"] [data-testid="detailText"]').first().text(),
+        );
 
         const descContainer = $page('[data-testid="viewJobBodyJobFullDescriptionContent"]').first();
         let description_html = ld.description_html || (descContainer.html() || '').trim();
