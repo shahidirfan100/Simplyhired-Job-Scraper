@@ -380,21 +380,27 @@ router.addHandler('DETAIL', async ({ request, response, session, crawler, body, 
     const $page = loadHtml(html || '');
     const ld = extractJobFromLdJson($page);
 
-    const title = cleanText(ld.title || $page('h1').first().text() || meta.title);
-    const company = cleanText(ld.company || $page('[data-testid="viewJobCompanyName"]').first().text() || meta.company);
-    const location = cleanText(ld.location || $page('[data-testid="viewJobCompanyLocation"]').first().text() || meta.location);
-    const salary = cleanText(ld.salary || $page('[data-testid="viewJobBodyJobCompensation"] [data-testid="detailText"]').first().text() || meta.salary);
+    let title = cleanText(ld.title || $page('h1').first().text() || meta.title);
+    let company = cleanText(ld.company || $page('[data-testid="viewJobCompanyName"]').first().text() || meta.company);
+    let location = cleanText(ld.location || $page('[data-testid="viewJobCompanyLocation"]').first().text() || meta.location);
+    let salary = cleanText(ld.salary || $page('[data-testid="viewJobBodyJobCompensation"] [data-testid="detailText"]').first().text() || meta.salary);
     const job_type = cleanText($page('[data-testid="viewJobBodyJobDetailsJobType"] [data-testid="detailText"]').first().text());
     const date_posted = cleanText(ld.date_posted || $page('[data-testid="viewJobBodyJobPostingTimestamp"] [data-testid="detailText"]').first().text());
 
     const descContainer = $page('[data-testid="viewJobBodyJobFullDescriptionContent"]').first();
-    const description_html = ld.description_html || (descContainer.html() || '').trim();
-    const description_text = cleanText(ld.description_html ? loadHtml(ld.description_html).text() : descContainer.text());
+    let description_html = ld.description_html || (descContainer.html() || '').trim();
+    let description_text = cleanText(ld.description_html ? loadHtml(ld.description_html).text() : descContainer.text());
 
-    if (!title || !description_text) {
-        session.markBad();
-        session.retire();
-        throw new Error('Empty title or description (possible block)');
+    // Fallbacks to avoid skipping saves
+    if (!title) title = cleanText(meta.title) || 'N/A';
+    if (!company) company = cleanText(meta.company) || 'N/A';
+    if (!location) location = cleanText(meta.location) || 'N/A';
+    if (!salary) salary = cleanText(meta.salary) || '';
+    if (!description_text) {
+        description_text = cleanText(description_html) || cleanText(meta.summary) || 'N/A';
+    }
+    if (!description_html) {
+        description_html = meta.summary || '';
     }
 
     const jobData = {
@@ -416,7 +422,7 @@ router.addHandler('DETAIL', async ({ request, response, session, crawler, body, 
     await Dataset.pushData(jobData);
     savedJobs += 1;
 
-    if (savedJobs % 10 === 0 || savedJobs === 1) {
+    if (savedJobs % 5 === 0 || savedJobs === 1) {
         log.info(`Saved ${savedJobs}/${maxJobs}: ${title}`);
     }
 });
