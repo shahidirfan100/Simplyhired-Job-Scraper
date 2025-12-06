@@ -410,9 +410,8 @@ const crawler = new CheerioCrawler({
     maxConcurrency,
     maxRequestsPerCrawl: Math.min(maxJobs * 10, 5000),
     maxRequestRetries: 6,
-    ignoreHttpErrorStatusCodes: true, // let handler decide what to do on 4xx/5xx
-    blockedStatusCodes: [], // do not auto-throw on 403/429; we manage sessions manually
     requestHandlerTimeoutSecs: 90,
+    blockedStatusCodes: [], // handle all statuses manually
     useHttp2: true,
     useSessionPool: true,
     persistCookiesPerSession: true,
