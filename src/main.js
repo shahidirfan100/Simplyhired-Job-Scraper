@@ -354,7 +354,7 @@ const input = (await Actor.getInput()) ?? {};
 
 const maxJobs = input.results_wanted ?? 200;
 const maxPages = input.maxPagesPerList ?? 20;
-const maxConcurrency = Math.min(input.maxConcurrency ?? 10, 20);
+const maxConcurrency = Math.min(input.maxConcurrency ?? 5, 20); // default lower to reduce blocks
 
 // Start URLs
 let startUrls = [];
@@ -384,7 +384,12 @@ try {
         });
     }
 } catch (err) {
-    log.warning(`Proxy configuration failed: ${err.message}, continuing without proxy.`);
+    log.warning(`Primary proxy configuration failed: ${err.message}. Falling back to Apify datacenter proxy (auto).`);
+    try {
+        proxyConfiguration = await Actor.createProxyConfiguration({ useApifyProxy: true });
+    } catch (err2) {
+        log.warning(`Datacenter proxy fallback also failed: ${err2.message}. Continuing without proxy (likely to be blocked).`);
+    }
 }
 
 const crawler = new CheerioCrawler({
@@ -392,7 +397,9 @@ const crawler = new CheerioCrawler({
     requestHandler: router,
     maxConcurrency,
     maxRequestsPerCrawl: Math.min(maxJobs * 10, 5000),
-    maxRequestRetries: 3,
+    maxRequestRetries: 6,
+    ignoreHttpErrorStatusCodes: true, // let handler decide what to do on 4xx/5xx
+    blockedStatusCodes: [], // do not auto-throw on 403/429; we manage sessions manually
     requestHandlerTimeoutSecs: 90,
     useSessionPool: true,
     persistCookiesPerSession: true,
@@ -442,6 +449,13 @@ crawler.maxJobs = maxJobs;
 crawler.maxPagesPerList = maxPages;
 
 log.info(`Starting SimplyHired scraper with ${startUrls.length} start URLs, target ${maxJobs} jobs, ${maxPages} pages max, concurrency ${maxConcurrency}`);
+if (proxyConfiguration) {
+    const cfg = proxyConfiguration || {};
+    const groups = cfg.groups || cfg.apifyProxyGroups;
+    log.info(`Proxy: Apify Proxy ${groups ? `groups=${groups.join(',')}` : '(auto)'}`);
+} else {
+    log.warning('Proxy: NONE configured. SimplyHired is likely to block non-proxy traffic.');
+}
 startUrls.forEach((u, i) => log.info(`Start URL ${i + 1}: ${u}`));
 
 try {
