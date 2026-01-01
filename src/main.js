@@ -323,19 +323,12 @@ const extractJobFromLdJson = ($) => {
 };
 
 // Build search URLs from input parameters
-const buildSearchUrls = (keywords, location, datePosted, remoteOnly) => {
+const buildSearchUrls = (keyword, location) => {
     const baseUrl = 'https://www.simplyhired.com/search';
-    const urls = [];
-    const keywordList = keywords ? keywords.split(',').map((k) => k.trim()).filter(Boolean) : [''];
-    const locationParam = remoteOnly ? 'Remote' : (location || '').trim();
-    for (const keyword of keywordList) {
-        const params = new URLSearchParams();
-        if (keyword) params.set('q', keyword);
-        if (locationParam) params.set('l', locationParam);
-        if (datePosted && datePosted !== 'any') params.set('fdb', datePosted);
-        urls.push(`${baseUrl}?${params.toString()}`);
-    }
-    return urls;
+    const params = new URLSearchParams();
+    if (keyword) params.set('q', keyword.trim());
+    if (location) params.set('l', location.trim());
+    return [`${baseUrl}?${params.toString()}`];
 };
 
 // -----------------------------------------------------------------------------
@@ -597,18 +590,18 @@ router.addHandler('DETAIL', async ({ request, response, session, crawler, body, 
 await Actor.init();
 const input = (await Actor.getInput()) ?? {};
 
-const maxJobs = input.results_wanted ?? 200;
-const maxPages = input.maxPagesPerList ?? 20;
-const maxConcurrency = Math.min(input.maxConcurrency ?? 5, 15);
+const maxJobs = input.results_wanted ?? 20;
+const maxPages = input.max_pages ?? 5;
+const maxConcurrency = 5; // Keep low for stealth
 
 // Start URLs
 let startUrls = [];
 if (input.startUrls && input.startUrls.length) {
     startUrls = input.startUrls.map((u) => (typeof u === 'string' ? u : u.url)).filter(Boolean);
-} else if (input.keywords || input.location || input.remote_only) {
-    startUrls = buildSearchUrls(input.keywords, input.location, input.date_posted, input.remote_only);
+} else if (input.keyword || input.location) {
+    startUrls = buildSearchUrls(input.keyword, input.location);
 } else {
-    startUrls = ['https://www.simplyhired.com/search?q=software+engineer&l='];
+    startUrls = ['https://www.simplyhired.com/search?q=software+engineer&l=USA'];
 }
 if (!startUrls.length) throw new Error('No start URLs provided.');
 

@@ -1,6 +1,6 @@
 {
-  "title": "SimplyHired Jobs Scraper - HTTP Optimized",
-  "description": "High-performance job scraper for SimplyHired.com using HTTP-based scraping. Search by keywords/location or provide direct URLs. Extracts comprehensive job data including descriptions, salary, company info, and more.",
+  "title": "SimplyHired Jobs Scraper",
+  "description": "High-performance job scraper for SimplyHired.com. Search by keywords and location. Extracts comprehensive job data including descriptions, salary, company info, and more.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
@@ -8,82 +8,58 @@
       "title": "Start URLs",
       "type": "array",
       "description": "List of SimplyHired search URLs to scrape. If provided, these will be used instead of keyword/location search.",
-      "editor": "requestListSources",
-      "prefill": [
-        {
-          "url": "https://www.simplyhired.com/search?q=software+engineer&l="
-        }
-      ]
+      "editor": "requestListSources"
     },
-    "keywords": {
-      "title": "Keywords (if not using Start URLs)",
+    "keyword": {
+      "title": "Keyword",
       "type": "string",
-      "description": "Job search keywords. Use commas to search multiple terms (e.g., 'software engineer, data scientist, product manager').",
+      "description": "Job search keyword (e.g., 'software engineer', 'data scientist', 'nurse').",
       "editor": "textfield",
-      "example": "software engineer"
+      "prefill": "software engineer"
     },
     "location": {
-      "title": "Location (if not using Start URLs)",
+      "title": "Location",
       "type": "string",
-      "description": "Geographic location for job search (e.g., 'New York, NY', 'San Francisco', 'Remote').",
+      "description": "Geographic location for job search (e.g., 'New York, NY', 'Los Angeles', 'Remote').",
       "editor": "textfield",
-      "example": "New York, NY"
-    },
-    "remote_only": {
-      "title": "Remote jobs only",
-      "type": "boolean",
-      "description": "Search for remote jobs only. This will override the location field.",
-      "editor": "checkbox",
-      "default": false
-    },
-    "date_posted": {
-      "title": "Date posted filter",
-      "type": "string",
-      "description": "Filter jobs by posting date.",
-      "editor": "select",
-      "enum": ["any", "1", "7", "30"],
-      "enumTitles": ["Any time", "Last 24 hours", "Last 7 days", "Last 30 days"],
-      "default": "any"
+      "prefill": "USA"
     },
     "results_wanted": {
       "title": "Maximum jobs to scrape",
       "type": "integer",
-      "description": "Maximum number of job listings to collect. Higher numbers take longer but provide more data.",
+      "description": "Maximum number of job listings to collect.",
       "minimum": 1,
       "maximum": 5000,
-      "default": 200,
+      "default": 20,
+      "prefill": 20,
       "editor": "number"
     },
-    "maxPagesPerList": {
-      "title": "Maximum pages per search",
+    "max_pages": {
+      "title": "Maximum pages",
       "type": "integer",
-      "description": "Safety limit on the number of pagination pages to visit per search query.",
+      "description": "Maximum number of pagination pages to visit.",
       "minimum": 1,
       "maximum": 100,
-      "default": 20,
-      "editor": "number"
-    },
-    "maxConcurrency": {
-      "title": "Concurrency",
-      "type": "integer",
-      "description": "Number of parallel requests. Higher = faster. Recommended: 10-20 for speed, 5-8 for maximum stealth.",
-      "minimum": 1,
-      "maximum": 50,
-      "default": 15,
+      "default": 5,
+      "prefill": 5,
       "editor": "number"
     },
     "proxyConfiguration": {
       "title": "Proxy configuration",
       "type": "object",
-      "description": "Proxy settings. RESIDENTIAL proxies recommended for best results and to avoid blocking.",
+      "description": "Proxy settings. RESIDENTIAL proxies recommended for best results.",
       "editor": "proxy",
       "default": {
         "useApifyProxy": true,
-        "apifyProxyGroups": ["RESIDENTIAL"]
+        "apifyProxyGroups": [
+          "RESIDENTIAL"
+        ]
       },
       "prefill": {
         "useApifyProxy": true,
-        "apifyProxyGroups": ["RESIDENTIAL"]
+        "apifyProxyGroups": [
+          "RESIDENTIAL"
+        ]
       }
     }
   },
