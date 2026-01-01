@@ -17,6 +17,7 @@ import { HeaderGenerator } from 'header-generator';
 // -----------------------------------------------------------------------------
 let pagesProcessed = 0;
 let savedJobs = 0;
+let enqueuedJobs = 0;
 let buildId = null;
 
 // -----------------------------------------------------------------------------
@@ -139,7 +140,11 @@ const extractFromNextData = (html) => {
             };
         }).filter(Boolean);
 
-        return { jobs, nextCursor: pageCursors['2'] || null, extractedBuildId };
+        // Get next cursor - find the next available page cursor
+        const cursorKeys = Object.keys(pageCursors).map(Number).filter(n => !isNaN(n)).sort((a, b) => a - b);
+        const nextCursor = cursorKeys.length > 0 ? pageCursors[cursorKeys[0]] : null;
+
+        return { jobs, nextCursor, extractedBuildId, pageCursors };
     } catch {
         return { jobs: [], nextCursor: null, extractedBuildId: null };
     }
@@ -214,8 +219,10 @@ router.addDefaultHandler(async ({ request, response, session, body, enqueueLinks
     if (request.label === 'DETAIL') return;
 
     pagesProcessed++;
-    const { maxJobs, maxPages } = crawler;
-    if (pagesProcessed > maxPages || savedJobs >= maxJobs) return;
+    const { maxJobs } = crawler;
+
+    // Stop only if we have enough jobs saved
+    if (savedJobs >= maxJobs) return;
 
     let html = body?.toString?.() || '';
     let status = response?.statusCode;
@@ -231,13 +238,10 @@ router.addDefaultHandler(async ({ request, response, session, body, enqueueLinks
 
     if (isBlockedStatus(status)) throw new Error(`Blocked: ${status}`);
 
-    log.info(`LIST ${pagesProcessed}: ${request.url.split('?')[0]}...`);
-
     // Extract jobs from __NEXT_DATA__
     const nextDataResult = extractFromNextData(html);
     if (nextDataResult.extractedBuildId && !buildId) {
         buildId = nextDataResult.extractedBuildId;
-        log.info(`BuildId: ${buildId}`);
     }
 
     let jobs = nextDataResult.jobs;
@@ -274,11 +278,12 @@ router.addDefaultHandler(async ({ request, response, session, body, enqueueLinks
                 return req;
             },
         });
-        log.info(`Enqueued ${jobRequests.length} details`);
+        enqueuedJobs += jobRequests.length;
     }
 
-    // Pagination
-    if (savedJobs < maxJobs && pagesProcessed < maxPages && nextCursor) {
+    // Pagination - continue until we have enough jobs enqueued
+    const needMoreJobs = enqueuedJobs < maxJobs;
+    if (needMoreJobs && nextCursor) {
         const urlObj = new URL(request.url);
         urlObj.searchParams.set('cursor', nextCursor);
         await enqueueLinks({
@@ -336,8 +341,8 @@ router.addHandler('DETAIL', async ({ request, response, session, crawler, body, 
     });
 
     savedJobs++;
-    if (savedJobs % 10 === 0 || savedJobs === 1) {
-        log.info(`Saved ${savedJobs}/${crawler.maxJobs}: ${title.substring(0, 40)}...`);
+    if (savedJobs % 25 === 0) {
+        log.info(`Progress: ${savedJobs}/${crawler.maxJobs} jobs saved`);
     }
 });
 
@@ -348,7 +353,8 @@ await Actor.init();
 const input = (await Actor.getInput()) ?? {};
 
 const maxJobs = input.results_wanted ?? 20;
-const maxPages = input.max_pages ?? 5;
+// Calculate pages needed: jobs / 20 per page + buffer
+const maxPages = Math.ceil(maxJobs / 20) + 2;
 
 // Build start URL
 let startUrl;
@@ -422,9 +428,8 @@ const crawler = new CheerioCrawler({
 
 // Attach config
 crawler.maxJobs = maxJobs;
-crawler.maxPages = maxPages;
 
-log.info(`Starting: ${maxJobs} jobs, ${maxPages} pages, concurrency 10`);
+log.info(`Starting: target ${maxJobs} jobs, concurrency 10`);
 log.info(`URL: ${startUrl}`);
 
 await crawler.run([{ url: startUrl, label: 'LIST' }]);
