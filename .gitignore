@@ -21,3 +21,5 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+package-lock.json
+/storage_benchmark

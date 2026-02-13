@@ -1,241 +1,223 @@
-# SimplyHired Job Scraper - HTTP Optimized ⚡
+# SimplyHired Jobs Scraper
 
-High-performance Apify actor for scraping job listings from SimplyHired.com using HTTP-based scraping with GotCrawler and Cheerio for maximum speed and efficiency.
+Extract job listings from SimplyHired quickly and reliably for research, monitoring, and hiring intelligence. Collect structured job data including company details, salary information, and full long-form job descriptions. Designed for repeatable, automated collection at scale.
 
-## 🚀 Features
+## Features
 
-- **Lightning Fast**: HTTP-based scraping (no browser overhead) with GotCrawler + Cheerio
-- **Smart Extraction**: Multiple selector strategies to handle SimplyHired's dynamic structure
-- **Comprehensive Data**: Extracts title, company, location, salary, description, employment type, and more
-- **Advanced Pagination**: 5 different pagination detection strategies for robust navigation
-- **Proxy Support**: Built-in RESIDENTIAL proxy support for anti-blocking
-- **Flexible Search**: Search by keywords, location, remote jobs, or provide custom URLs
-- **Resource Efficient**: Uses ~70% less resources than browser-based scrapers
-- **Production Ready**: Built for Apify platform with proper error handling and logging
+- **Comprehensive job extraction** — Collect titles, companies, locations, salary, and metadata.
+- **Long-form descriptions** — Capture full plain-text and HTML descriptions for deeper analysis.
+- **Automatic pagination** — Continue collection across search pages until your target is reached.
+- **Flexible inputs** — Run by keyword/location or provide direct search URLs.
+- **Duplicate-resistant output** — Save unique jobs using stable identifiers.
+- **Automation-ready datasets** — Use output in recurring workflows and reporting pipelines.
 
-## 📊 Extracted Data
+## Use Cases
 
-Each job listing includes:
+### Hiring Market Analysis
+Track demand across locations and roles over time. Build datasets to monitor where hiring is rising and which positions are most active.
 
-- **title**: Job title
-- **company**: Company name
-- **location**: Job location
-- **summary**: Short job description from listing page
-- **salary**: Salary information (if available)
-- **employment_type**: Full-time, Part-time, Contract, etc.
-- **posted**: Date posted (e.g., "2 days ago")
-- **description_text**: Full job description (plain text)
-- **description_html**: Full job description (HTML format)
-- **url**: Direct link to the job posting
-- **crawledAt**: Timestamp when the job was scraped
+### Lead Generation
+Find companies actively hiring in your target segment. Use hiring activity as a strong outreach and prioritization signal.
 
-## 🎯 Use Cases
+### Job Intelligence Dashboards
+Create dashboards, alerts, and trend reports powered by fresh job data. Keep internal teams updated with scheduled collections.
 
-- **Job Market Research**: Analyze hiring trends and salary ranges
-- **Job Aggregation**: Build your own job board or feed
-- **Competitive Intelligence**: Monitor competitor hiring patterns
-- **Career Planning**: Track job requirements and skills in demand
-- **Lead Generation**: Find companies actively hiring in your industry
+### Skills and Compensation Research
+Analyze requirements, salary text, and job types to identify in-demand skills and market expectations.
 
-## ⚙️ Input Configuration
+---
 
-### Search Parameters
+## Input Parameters
 
-**Start URLs** (optional)
-- Provide direct SimplyHired search URLs
-- If provided, overrides keyword/location search
-- Example: `https://www.simplyhired.com/search?q=software+engineer&l=New+York`
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `startUrls` | Array | No | — | One or more SimplyHired search URLs. If provided, these are used directly. |
+| `keyword` | String | No | `software engineer` | Search keyword (for example, `data engineer`). |
+| `location` | String | No | `USA` | Location filter (for example, `Remote`, `New York, NY`). |
+| `results_wanted` | Integer | No | `20` | Maximum number of jobs to collect. |
+| `max_pages` | Integer | No | `250` | Hard cap for pagination pages to visit. |
+| `proxyConfiguration` | Object | No | Residential proxy preset | Proxy settings for reliable collection. |
 
-**Keywords** (optional)
-- Job search terms (e.g., "software engineer", "data scientist")
-- Supports comma-separated multiple keywords
-- Example: `software engineer, backend developer, python developer`
+---
 
-**Location** (optional)
-- Geographic location (e.g., "New York, NY", "San Francisco", "Remote")
-- Supports city, state, or country
+## Output Data
 
-**Remote Only** (checkbox)
-- Search for remote jobs only
-- Overrides location field when enabled
+Each dataset item can contain:
 
-**Date Posted Filter**
-- `any`: All jobs
-- `1`: Last 24 hours
-- `7`: Last 7 days
-- `30`: Last 30 days
+| Field | Type | Description |
+|-------|------|-------------|
+| `job_key` | String | Unique job identifier. |
+| `title` | String | Job title. |
+| `company` | String | Hiring company name. |
+| `location` | String | Job location. |
+| `salary` | String | Salary text when available. |
+| `job_type` | String | Employment type details when available. |
+| `description_text` | String | Full long-form job description in plain text. |
+| `description_html` | String | Full long-form job description in HTML format. |
+| `snippet` | String | Short preview text from search results. |
+| `summary` | String | Short listing summary. |
+| `requirements` | Array | Requirement keywords from listing metadata. |
+| `skills` | Array | Skill and metadata terms normalized for analysis. |
+| `benefits` | Array | Benefit keywords when available. |
+| `remote_attributes` | Array | Remote or hybrid attributes when available. |
+| `sponsored` | Boolean | Whether the listing is sponsored. |
+| `company_rating` | Number | Company rating when provided. |
+| `date_posted` | String | Posting date timestamp. |
+| `url` | String | Direct job URL. |
+| `company_page_url` | String | Company page URL when available. |
+| `source_search_url` | String | Search URL used to discover the listing. |
+| `source` | String | Data source label. |
+| `scraped_at` | String | Extraction timestamp. |
 
-### Scraping Limits
+---
 
-**Maximum Jobs to Scrape** (default: 200)
-- Total number of job listings to collect
-- Range: 1-5000
+## Usage Examples
 
-**Maximum Pages Per Search** (default: 20)
-- Safety limit for pagination
-- Prevents infinite loops
+### Basic Search
 
-**Concurrency** (default: 30)
-- Number of parallel HTTP requests
-- Higher = faster, but uses more resources
-- Recommended: 20-50 for HTTP scraping
-
-### Proxy Configuration
-
-**Default**: RESIDENTIAL proxies (recommended)
-- Prevents blocking and IP bans
-- Rotating IPs for each request
-- US country code by default
-
-## 📖 Usage Examples
-
-### Example 1: Search by Keywords and Location
+Collect 50 software engineering jobs in the US:
 
 ```json
 {
-  "keywords": "software engineer",
-  "location": "San Francisco, CA",
-  "results_wanted": 100,
-  "date_posted": "7",
-  "maxConcurrency": 30
+  "keyword": "software engineer",
+  "location": "USA",
+  "results_wanted": 50,
+  "max_pages": 30
 }
 ```
 
-### Example 2: Multiple Keywords
+### Direct Search URL
 
-```json
-{
-  "keywords": "data scientist, machine learning engineer, AI researcher",
-  "location": "Remote",
-  "results_wanted": 200,
-  "remote_only": true
-}
-```
-
-### Example 3: Custom URLs
+Run from a specific SimplyHired search page:
 
 ```json
 {
   "startUrls": [
-    { "url": "https://www.simplyhired.com/search?q=frontend+developer&l=New+York" },
-    { "url": "https://www.simplyhired.com/search?q=backend+developer&l=Austin" }
+    { "url": "https://www.simplyhired.com/search?q=data+engineer&l=Remote" }
   ],
-  "results_wanted": 150,
-  "maxConcurrency": 40
-}
-```
-
-### Example 4: Remote Jobs Only
-
-```json
-{
-  "keywords": "product manager",
-  "remote_only": true,
   "results_wanted": 100,
-  "date_posted": "1"
+  "max_pages": 60
 }
 ```
 
-## 🏗️ Architecture
+### Larger Collection
 
-This actor uses:
-- **Apify SDK v3**: Actor framework and data storage
-- **Crawlee v3**: Web scraping framework
-- **GotCrawler**: HTTP-based crawler (no browser overhead)
-- **Cheerio**: Fast HTML parsing and DOM manipulation
-- **got-scraping**: HTTP client with anti-blocking features
-
-## 🔧 Technical Details
-
-### Performance Optimizations
-
-1. **HTTP-Only Scraping**: No browser = 10x faster than Playwright/Puppeteer
-2. **Smart Concurrency**: Optimized parallel requests with session pooling
-3. **Minimal Waiting**: No DOM loading waits, instant parsing
-4. **Resource Blocking**: Not needed for HTTP (no images/CSS to block)
-5. **Session Reuse**: Persistent sessions reduce overhead
-
-### Anti-Blocking Measures
-
-1. **RESIDENTIAL Proxies**: Rotating residential IPs
-2. **User Agent Rotation**: Multiple realistic browser user agents
-3. **HTTP Headers**: Complete browser-like header sets
-4. **Session Pooling**: Distributed requests across sessions
-5. **Request Throttling**: Controlled concurrency to avoid rate limits
-
-### Selector Strategies
-
-The scraper uses multiple fallback strategies to extract data:
-- Primary: `data-testid` attributes (SimplyHired's structure)
-- Secondary: Class-based selectors
-- Tertiary: Semantic HTML patterns
-- Quaternary: Content-based detection
-- Quintenary: Link pattern matching
-
-## 💾 Output Format
-
-Results are saved to the Apify dataset in JSON format:
+Collect a larger dataset for analysis:
 
 ```json
 {
-  "title": "Senior Software Engineer",
-  "company": "Tech Corp Inc.",
-  "location": "San Francisco, CA",
-  "summary": "We're looking for an experienced software engineer...",
-  "salary": "$120,000 - $180,000 a year",
-  "employment_type": "Full-time",
-  "posted": "2 days ago",
-  "description_text": "Full job description here...",
-  "description_html": "<div>Full job description with HTML...</div>",
-  "url": "https://www.simplyhired.com/job/...",
-  "crawledAt": "2024-01-15T10:30:00.000Z"
+  "keyword": "product manager",
+  "location": "United States",
+  "results_wanted": 500,
+  "max_pages": 250,
+  "proxyConfiguration": {
+    "useApifyProxy": true,
+    "apifyProxyGroups": ["RESIDENTIAL"]
+  }
 }
 ```
-
-## 🐛 Troubleshooting
-
-**No jobs found**
-- Website structure may have changed
-- Check if search URL is valid
-- Try different keywords or location
-
-**Rate limiting / Blocking**
-- Ensure RESIDENTIAL proxies are enabled
-- Reduce concurrency
-- Add delays between requests
-
-**Incomplete data**
-- Some fields may be optional
-- Not all jobs have salary information
-- Description extraction uses multiple strategies
-
-## 📝 Best Practices
-
-1. **Use RESIDENTIAL proxies** for best results
-2. **Start with lower concurrency** (20-30) and increase if stable
-3. **Set realistic limits** - Don't scrape more than needed
-4. **Monitor runs** - Check logs for any issues
-5. **Export regularly** - Download results before they expire
-
-## 🔄 Updates & Maintenance
-
-This scraper is maintained to work with SimplyHired's current structure. If you encounter issues:
-1. Check the logs for error messages
-2. Verify the website structure hasn't changed
-3. Update selectors if needed
-4. Contact support if problems persist
-
-## 📜 License
-
-This actor is provided as-is for use on the Apify platform. Please ensure you comply with SimplyHired's Terms of Service when scraping their website.
-
-## 🤝 Support
-
-For questions or issues:
-- Check the Apify documentation
-- Review the logs for error messages
-- Contact Apify support
 
 ---
 
-**Built with ❤️ using Apify SDK v3 + Crawlee v3**
+## Sample Output
+
+```json
+{
+  "job_key": "abcd1234example",
+  "title": "Senior Software Engineer",
+  "company": "Example Technologies",
+  "location": "Remote",
+  "salary": "$140,000 - $180,000 a year",
+  "job_type": "Full-time",
+  "description_text": "Full long-form job description text...",
+  "description_html": "<p>Full long-form job description HTML...</p>",
+  "snippet": "Short listing preview...",
+  "requirements": ["Python", "AWS", "API design"],
+  "benefits": ["Health insurance", "401(k)"],
+  "sponsored": false,
+  "company_rating": 4.2,
+  "date_posted": "2026-02-13T10:40:34.160Z",
+  "url": "https://www.simplyhired.com/job/example",
+  "source": "SimplyHired",
+  "scraped_at": "2026-02-13T10:40:34.160Z"
+}
+```
+
+---
+
+## Tips for Best Results
+
+### Start With Small Runs
+- Begin with `results_wanted: 20` to validate the query.
+- Increase limits after confirming output quality.
+
+### Use Clear Search Terms
+- Specific keywords produce cleaner datasets.
+- Add location constraints to reduce noise when needed.
+
+### Tune Pagination Deliberately
+- Keep `max_pages` high enough for larger targets.
+- Lower `max_pages` for faster exploratory runs.
+
+### Use Reliable Proxy Settings
+- Residential proxies improve consistency for repeated runs.
+- Keep proxy settings enabled for scheduled workloads.
+
+---
+
+## Integrations
+
+Connect your data with:
+
+- **Google Sheets** — Share job insights with teams.
+- **Airtable** — Build searchable job and company datasets.
+- **Make** — Trigger no-code automations from new runs.
+- **Zapier** — Route results into business tools.
+- **Webhooks** — Send run results to your own endpoints.
+
+### Export Formats
+
+- **JSON** — API and application workflows.
+- **CSV** — Spreadsheet and BI analysis.
+- **Excel** — Business reporting and sharing.
+- **XML** — System interoperability where needed.
+
+---
+
+## Frequently Asked Questions
+
+### How many jobs can I collect?
+Set `results_wanted` based on your needs. The actor collects until it reaches your target or your pagination limit.
+
+### Does output include long-form descriptions?
+Yes. Each item includes `description_text` and `description_html` when available.
+
+### Can I use multiple start URLs in one run?
+Yes. Add multiple entries in `startUrls` and they will be processed in sequence.
+
+### Why are some fields empty?
+Some listings do not publish every attribute, such as salary or benefits. Empty values reflect source availability.
+
+### Does it reduce duplicates?
+Yes. The actor is designed to reduce duplicates using stable job identifiers.
+
+### Is it suitable for scheduled monitoring?
+Yes. It works well with recurring runs and automated dataset processing.
+
+---
+
+## Support
+
+For issues or feature requests, use the Apify Console support channels.
+
+### Resources
+
+- [Apify Documentation](https://docs.apify.com/)
+- [Apify API Reference](https://docs.apify.com/api/v2)
+- [Apify Scheduling](https://docs.apify.com/platform/schedules)
+
+---
+
+## Legal Notice
+
+This actor is intended for legitimate data collection and analysis. You are responsible for complying with website terms, local laws, and data-use obligations.

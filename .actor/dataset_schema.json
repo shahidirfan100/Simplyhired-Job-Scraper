@@ -10,6 +10,8 @@
           "company",
           "location",
           "salary",
+          "skills",
+          "description_text",
           "job_type",
           "date_posted",
           "url"
@@ -32,6 +34,14 @@
           },
           "salary": {
             "label": "Salary",
+            "format": "text"
+          },
+          "skills": {
+            "label": "Skills",
+            "format": "array"
+          },
+          "description_text": {
+            "label": "Description",
             "format": "text"
           },
           "job_type": {

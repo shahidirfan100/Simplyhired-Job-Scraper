@@ -37,29 +37,23 @@
     "max_pages": {
       "title": "Maximum pages",
       "type": "integer",
-      "description": "Maximum number of pagination pages to visit.",
+      "description": "Maximum number of pagination pages to visit (used as a hard safety cap).",
       "minimum": 1,
-      "maximum": 100,
-      "default": 5,
-      "prefill": 5,
+      "maximum": 1000,
+      "default": 250,
+      "prefill": 250,
       "editor": "number"
     },
     "proxyConfiguration": {
       "title": "Proxy configuration",
       "type": "object",
-      "description": "Proxy settings. RESIDENTIAL proxies recommended for best results.",
+      "description": "Proxy settings. Uses Apify Proxy by default. If your selected proxy group is unavailable, the actor will continue without proxy.",
       "editor": "proxy",
       "default": {
-        "useApifyProxy": true,
-        "apifyProxyGroups": [
-          "RESIDENTIAL"
-        ]
+        "useApifyProxy": true
       },
       "prefill": {
-        "useApifyProxy": true,
-        "apifyProxyGroups": [
-          "RESIDENTIAL"
-        ]
+        "useApifyProxy": true
       }
     }
   },

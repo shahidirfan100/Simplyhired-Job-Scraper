@@ -1,455 +1,552 @@
-// SimplyHired Job Scraper - Fast, Stealthy, Production-Ready
-// Optimized for speed with advanced anti-detection techniques
-
 import { Actor } from 'apify';
-import {
-    CheerioCrawler,
-    Dataset,
-    log,
-    createCheerioRouter,
-} from 'crawlee';
+import log from '@apify/log';
 import { load as loadHtml } from 'cheerio';
 import { gotScraping } from 'got-scraping';
 import { HeaderGenerator } from 'header-generator';
 
-// -----------------------------------------------------------------------------
-// Globals
-// -----------------------------------------------------------------------------
-let pagesProcessed = 0;
-let savedJobs = 0;
-let enqueuedJobs = 0;
-let buildId = null;
-
-// -----------------------------------------------------------------------------
-// Stealth Configuration
-// -----------------------------------------------------------------------------
+const BASE_URL = 'https://www.simplyhired.com';
+const DETAIL_CONCURRENCY = 8;
 const headerGenerator = new HeaderGenerator({
     browsers: [
-        { name: 'chrome', minVersion: 120, maxVersion: 131 },
-        { name: 'firefox', minVersion: 115, maxVersion: 130 },
+        { name: 'chrome', minVersion: 120, maxVersion: 132 },
+        { name: 'firefox', minVersion: 115, maxVersion: 131 },
     ],
     devices: ['desktop'],
     operatingSystems: ['windows', 'macos'],
-    locales: ['en-US', 'en-GB', 'en'],
+    locales: ['en-US', 'en'],
 });
 
-// Realistic viewport sizes
-const viewports = [
-    { width: 1920, height: 1080 },
-    { width: 1536, height: 864 },
-    { width: 1440, height: 900 },
-    { width: 1366, height: 768 },
-    { width: 2560, height: 1440 },
-];
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const randomBetween = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
+const cleanText = (value) => (value || '').toString().replace(/\s+/g, ' ').trim();
+const toUniqueArray = (values) => {
+    if (!Array.isArray(values)) return [];
+    const out = [];
+    const seen = new Set();
 
-const getRandomViewport = () => viewports[Math.floor(Math.random() * viewports.length)];
+    for (const value of values) {
+        const cleaned = cleanText(value);
+        if (!cleaned) continue;
+        const key = cleaned.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(cleaned);
+    }
 
-// -----------------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------------
-const absolute = (href) => {
-    if (!href) return null;
-    if (href.startsWith('http')) return href;
-    if (href.startsWith('/')) return `https://www.simplyhired.com${href}`;
-    return `https://www.simplyhired.com/${href}`;
+    return out;
+};
+const isBlockedStatus = (status) => status === 403 || status === 429 || status === 503;
+const toIsoFromMs = (value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    return new Date(n).toISOString();
 };
 
-const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
-const randomDelay = (min, max) => Math.floor(min + Math.random() * (max - min));
-const isBlockedStatus = (code) => code === 403 || code === 429 || code === 503;
-const cleanText = (text) => (text || '').replace(/\s+/g, ' ').trim();
-
-// Generate stealth headers - mimics real browser perfectly
-const generateHeaders = (session, referer = 'https://www.simplyhired.com/') => {
-    const viewport = session?.userData?.viewport || getRandomViewport();
-    const headers = headerGenerator.getHeaders();
-
-    // Extract Chrome version for sec-ch-ua
-    const chromeMatch = headers['user-agent']?.match(/Chrome\/(\d+)/);
-    const chromeVer = chromeMatch ? chromeMatch[1] : '131';
-
-    return {
-        ...headers,
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'accept-language': 'en-US,en;q=0.9',
-        'accept-encoding': 'gzip, deflate, br',
-        'cache-control': 'max-age=0',
-        'sec-ch-ua': `"Chromium";v="${chromeVer}", "Google Chrome";v="${chromeVer}", "Not_A Brand";v="24"`,
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'sec-fetch-dest': 'document',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-site': referer.includes('simplyhired.com') ? 'same-origin' : 'none',
-        'sec-fetch-user': '?1',
-        'upgrade-insecure-requests': '1',
-        'referer': referer,
-        // Viewport hints for additional stealth
-        'viewport-width': String(viewport.width),
-    };
+const absoluteUrl = (value) => {
+    if (!value) return '';
+    if (value.startsWith('http://') || value.startsWith('https://')) return value;
+    if (value.startsWith('/')) return `${BASE_URL}${value}`;
+    return `${BASE_URL}/${value}`;
 };
 
-// Fast fetch with got-scraping
-const fetchWithGot = async (url, proxyUrl, session) => {
-    const headers = generateHeaders(session, 'https://www.simplyhired.com/search');
-    const res = await gotScraping({
-        url,
-        proxyUrl,
-        timeout: { request: 25000 },
-        retry: { limit: 0 },
-        headers,
-        http2: true,
-        throwHttpErrors: false,
-    });
-    return { statusCode: res.statusCode, body: res.body?.toString?.() || '' };
-};
-
-// -----------------------------------------------------------------------------
-// Data Extraction Functions
-// -----------------------------------------------------------------------------
-const extractFromNextData = (html, currentPage = 1) => {
-    const $ = loadHtml(html);
-    const script = $('#__NEXT_DATA__');
-    if (!script.length) return { jobs: [], nextCursor: null, extractedBuildId: null };
-
+const tryDecodeURIComponent = (value) => {
+    if (!value) return '';
     try {
-        const json = JSON.parse(script.text());
-        const extractedBuildId = json?.buildId || null;
-        const pageProps = json?.props?.pageProps || {};
-        const list = pageProps.jobs || [];
-        const pageCursors = pageProps.pageCursors || {};
-
-        const jobs = list.map((item) => {
-            const title = item.title || '';
-            const company = item.company || item.companyName || '';
-            const location = item.location || item.formattedLocation || '';
-            const salaryObj = item.salary || item.estimatedSalary || {};
-            const salary = typeof salaryObj === 'object'
-                ? cleanText([salaryObj.min && `$${salaryObj.min}`, salaryObj.max && `$${salaryObj.max}`, salaryObj.type].filter(Boolean).join(' - '))
-                : cleanText(salaryObj);
-            const link = item.viewJobLink || item.url || '';
-            if (!title || !link) return null;
-            return {
-                title: cleanText(title),
-                company: cleanText(company),
-                location: cleanText(location),
-                salary,
-                job_type: cleanText(item.employmentType || ''),
-                date_posted: cleanText(item.datePosted || item.formattedDate || ''),
-                summary: cleanText(item.snippet || ''),
-                link: absolute(link),
-            };
-        }).filter(Boolean);
-
-        // Get next page cursor - look for currentPage + 1
-        const nextPageNum = String(currentPage + 1);
-        let nextCursor = pageCursors[nextPageNum] || null;
-
-        // If not found, try to get any available next cursor
-        if (!nextCursor) {
-            const availablePages = Object.keys(pageCursors).map(Number).filter(n => !isNaN(n) && n > currentPage).sort((a, b) => a - b);
-            if (availablePages.length > 0) {
-                nextCursor = pageCursors[String(availablePages[0])];
-            }
-        }
-
-        return { jobs, nextCursor, extractedBuildId };
+        return decodeURIComponent(value);
     } catch {
-        return { jobs: [], nextCursor: null, extractedBuildId: null };
+        return value;
     }
-};
-
-const extractJobsFromHtml = ($) => {
-    const jobs = [];
-    const jobCards = $('div[data-testid="searchSerpJob"], li[data-testid="itemListing"]');
-
-    jobCards.each((_, el) => {
-        const card = $(el);
-        const titleEl = card.find('h2[data-testid="searchSerpJobTitle"], h2 a').first();
-        const title = cleanText(titleEl.text());
-        const link = titleEl.attr('href') || card.find('a[href*="/job/"]').first().attr('href');
-
-        if (!title || !link) return;
-
-        jobs.push({
-            title,
-            company: cleanText(card.find('span[data-testid="companyName"]').first().text()),
-            location: cleanText(card.find('span[data-testid="jobLocation"]').first().text()),
-            salary: cleanText(card.find('span[data-testid="jobSalaryInfo"]').first().text()),
-            summary: cleanText(card.find('[data-testid="job-snippet"]').first().text()),
-            link: absolute(link),
-        });
-    });
-
-    const nextLink = $('a[aria-label="Next page"]').first();
-    return { jobs, nextUrl: nextLink.length ? absolute(nextLink.attr('href')) : null };
-};
-
-const extractJobFromLdJson = ($) => {
-    for (const el of $('script[type="application/ld+json"]').toArray()) {
-        try {
-            const json = JSON.parse($(el).text());
-            const posting = Array.isArray(json) ? json.find((j) => j['@type'] === 'JobPosting') : json;
-            if (posting?.['@type'] === 'JobPosting') {
-                return {
-                    title: cleanText(posting.title),
-                    company: cleanText(posting.hiringOrganization?.name),
-                    location: cleanText(
-                        [posting.jobLocation?.address?.addressLocality, posting.jobLocation?.address?.addressRegion]
-                            .filter(Boolean).join(', ')
-                    ),
-                    salary: cleanText(
-                        posting.baseSalary?.value?.minValue && posting.baseSalary?.value?.maxValue
-                            ? `$${posting.baseSalary.value.minValue}-${posting.baseSalary.value.maxValue}`
-                            : posting.baseSalary?.value?.value ? `$${posting.baseSalary.value.value}` : ''
-                    ),
-                    date_posted: posting.datePosted || '',
-                    description_html: posting.description || '',
-                };
-            }
-        } catch { /* ignore */ }
-    }
-    return {};
 };
 
 const buildSearchUrl = (keyword, location) => {
     const params = new URLSearchParams();
     if (keyword) params.set('q', keyword.trim());
     if (location) params.set('l', location.trim());
-    return `https://www.simplyhired.com/search?${params.toString()}`;
+    return `${BASE_URL}/search?${params.toString()}`;
 };
 
-// -----------------------------------------------------------------------------
-// Router
-// -----------------------------------------------------------------------------
-const router = createCheerioRouter();
-
-router.addDefaultHandler(async ({ request, response, session, body, enqueueLinks, crawler, proxyInfo }) => {
-    if (request.label === 'DETAIL') return;
-
-    pagesProcessed++;
-    const currentPage = request.userData?.currentPage || 1;
-    const { maxJobs } = crawler;
-
-    // Stop only if we have enough jobs saved
-    if (savedJobs >= maxJobs) return;
-
-    let html = body?.toString?.() || '';
-    let status = response?.statusCode;
-
-    // Refetch if blocked
-    if (isBlockedStatus(status) || html.length < 500) {
-        await sleep(randomDelay(1000, 2000));
-        session?.retire();
-        const refetch = await fetchWithGot(request.url, proxyInfo?.url, session);
-        status = refetch.statusCode;
-        html = refetch.body;
+const getStartUrls = (input) => {
+    if (!Array.isArray(input.startUrls) || !input.startUrls.length) {
+        return [buildSearchUrl(input.keyword || 'software engineer', input.location || 'USA')];
     }
 
-    if (isBlockedStatus(status)) throw new Error(`Blocked: ${status}`);
+    return input.startUrls
+        .map((item) => (typeof item === 'string' ? item : item?.url))
+        .filter(Boolean);
+};
 
-    log.info(`Page ${currentPage}: processing...`);
-
-    // Extract jobs from __NEXT_DATA__
-    const nextDataResult = extractFromNextData(html, currentPage);
-    if (nextDataResult.extractedBuildId && !buildId) {
-        buildId = nextDataResult.extractedBuildId;
+const normalizeProxyInput = (proxyConfigurationInput) => {
+    if (!proxyConfigurationInput || typeof proxyConfigurationInput !== 'object') {
+        return { useApifyProxy: true };
     }
 
-    let jobs = nextDataResult.jobs;
-    const nextCursor = nextDataResult.nextCursor;
+    const normalized = { ...proxyConfigurationInput };
 
-    // Fallback to HTML
-    if (!jobs.length) {
-        const htmlResult = extractJobsFromHtml(loadHtml(html));
-        jobs = htmlResult.jobs;
+    if (normalized.apifyProxyGroups && !Array.isArray(normalized.groups)) {
+        normalized.groups = Array.isArray(normalized.apifyProxyGroups)
+            ? normalized.apifyProxyGroups
+            : [normalized.apifyProxyGroups];
+    }
+    if (typeof normalized.apifyProxyCountry === 'string' && !normalized.countryCode) {
+        normalized.countryCode = normalized.apifyProxyCountry;
     }
 
-    if (!jobs.length) {
-        log.warning(`No jobs on page ${currentPage}`);
-        return;
-    }
+    delete normalized.apifyProxyGroups;
+    delete normalized.apifyProxyCountry;
 
-    log.info(`Page ${currentPage}: found ${jobs.length} jobs, enqueued so far: ${enqueuedJobs}`);
+    return normalized;
+};
 
-    const capacity = maxJobs - enqueuedJobs;
-    const limitedJobs = jobs.slice(0, capacity);
+const isProxyError = (error) => {
+    const msg = String(error?.message || '').toLowerCase();
+    return [
+        'proxy',
+        'tunnel',
+        '407',
+        'authentication',
+        'invalid password',
+        'user not found',
+        'socket hang up',
+        'etimedout',
+        'econnreset',
+        'ehostunreach',
+        'enotfound',
+    ].some((token) => msg.includes(token));
+};
 
-    // Enqueue detail pages
-    const jobRequests = limitedJobs.map((job) => ({
-        url: job.link,
-        label: 'DETAIL',
-        userData: { jobMeta: job },
-    })).filter((r) => r.url);
-
-    if (jobRequests.length) {
-        await enqueueLinks({
-            urls: jobRequests.map((r) => r.url),
-            label: 'DETAIL',
-            transformRequestFunction: (req) => {
-                const meta = jobRequests.find((r) => r.url === req.url)?.userData?.jobMeta;
-                req.userData = { jobMeta: meta, label: 'DETAIL' };
-                return req;
-            },
-        });
-        enqueuedJobs += jobRequests.length;
-    }
-
-    // Pagination - continue until we have enough jobs enqueued
-    const needMoreJobs = enqueuedJobs < maxJobs;
-    if (needMoreJobs && nextCursor) {
-        const urlObj = new URL(request.url);
-        urlObj.searchParams.set('cursor', nextCursor);
-        const nextUrl = urlObj.toString();
-        log.info(`Enqueueing page ${currentPage + 1}`);
-        await enqueueLinks({
-            urls: [nextUrl],
-            label: 'LIST',
-            transformRequestFunction: (req) => {
-                req.userData = { label: 'LIST', currentPage: currentPage + 1 };
-                return req;
-            },
-        });
-    } else if (needMoreJobs && !nextCursor) {
-        log.warning(`No next cursor available on page ${currentPage}`);
-    }
-});
-
-router.addHandler('DETAIL', async ({ request, response, session, crawler, body, proxyInfo }) => {
-    const meta = request.userData?.jobMeta || {};
-    if (savedJobs >= crawler.maxJobs) return;
-
-    let html = body?.toString?.() || '';
-    let status = response?.statusCode;
-
-    // Refetch if needed
-    if (isBlockedStatus(status) || html.length < 500) {
-        await sleep(randomDelay(500, 1500));
-        session?.retire();
-        const refetch = await fetchWithGot(request.url, proxyInfo?.url, session);
-        status = refetch.statusCode;
-        html = refetch.body;
-    }
-
-    // Even if blocked, save meta data
-    const $page = loadHtml(html || '');
-    const ld = status < 400 ? extractJobFromLdJson($page) : {};
-
-    const title = cleanText(ld.title || $page('h1').first().text() || meta.title) || 'N/A';
-    const company = cleanText(ld.company || $page('[data-testid="viewJobCompanyName"]').text() || meta.company) || 'N/A';
-    const location = cleanText(ld.location || $page('[data-testid="viewJobCompanyLocation"]').text() || meta.location) || 'N/A';
-    const salary = cleanText(ld.salary || $page('[data-testid="viewJobBodyJobCompensation"] [data-testid="detailText"]').text() || meta.salary) || '';
-
-    const descContainer = $page('[data-testid="viewJobBodyJobFullDescriptionContent"]').first();
-    const description_html = ld.description_html || descContainer.html() || meta.summary || '';
-    const description_text = cleanText(ld.description_html ? loadHtml(ld.description_html).text() : descContainer.text()) || cleanText(meta.summary) || '';
-
-    await Dataset.pushData({
-        url: request.url,
-        title,
-        company,
-        location,
-        salary,
-        job_type: cleanText(meta.job_type || $page('[data-testid="viewJobBodyJobDetailsJobType"] [data-testid="detailText"]').text()) || '',
-        date_posted: cleanText(ld.date_posted || meta.date_posted || '') || '',
-        description_text,
-        description_html,
-        source: 'SimplyHired',
-        scraped_at: new Date().toISOString(),
-    });
-
-    savedJobs++;
-    if (savedJobs % 25 === 0) {
-        log.info(`Progress: ${savedJobs}/${crawler.maxJobs} jobs saved`);
-    }
-});
-
-// -----------------------------------------------------------------------------
-// Main Entry
-// -----------------------------------------------------------------------------
-await Actor.init();
-const input = (await Actor.getInput()) ?? {};
-
-const maxJobs = input.results_wanted ?? 20;
-// Calculate pages needed: jobs / 20 per page + buffer
-const maxPages = Math.ceil(maxJobs / 20) + 2;
-
-// Build start URL
-let startUrl;
-if (input.startUrls?.length) {
-    startUrl = typeof input.startUrls[0] === 'string' ? input.startUrls[0] : input.startUrls[0].url;
-} else {
-    startUrl = buildSearchUrl(input.keyword || 'software engineer', input.location || 'USA');
-}
-
-// Proxy configuration
-let proxyConfiguration;
-try {
-    proxyConfiguration = await Actor.createProxyConfiguration(
-        input.proxyConfiguration || { useApifyProxy: true, groups: ['RESIDENTIAL'], countryCode: 'US' }
+const createProxyState = async (proxyConfigurationInput) => {
+    const normalized = normalizeProxyInput(proxyConfigurationInput);
+    const wantsProxy = Boolean(
+        normalized?.useApifyProxy
+        || (Array.isArray(normalized?.proxyUrls) && normalized.proxyUrls.length)
     );
-} catch (err) {
-    log.warning(`Residential proxy failed: ${err.message}, using datacenter`);
-    proxyConfiguration = await Actor.createProxyConfiguration({ useApifyProxy: true });
-}
 
-// Optimized crawler settings
-const crawler = new CheerioCrawler({
-    proxyConfiguration,
-    requestHandler: router,
+    if (!wantsProxy) {
+        return { configuration: null, enabled: false, failures: 0 };
+    }
 
-    // Speed: Higher concurrency (8-10)
-    maxConcurrency: 10,
-    minConcurrency: 3,
+    try {
+        const configuration = await Actor.createProxyConfiguration(normalized);
+        return { configuration, enabled: true, failures: 0 };
+    } catch (error) {
+        log.warning(`Proxy initialization failed, continuing without proxy: ${error.message}`);
+        return { configuration: null, enabled: false, failures: 0 };
+    }
+};
 
-    // Efficiency
-    maxRequestsPerCrawl: maxJobs * 8,
-    maxRequestRetries: 3,
-    requestHandlerTimeoutSecs: 60,
+const createHeaders = ({ referer, acceptJson = false }) => {
+    const generated = headerGenerator.getHeaders();
+    const userAgent = generated['user-agent'] || generated['User-Agent'];
+    const chromeVersion = (userAgent?.match(/Chrome\/(\d+)/)?.[1]) || '132';
 
-    // Session management for stealth
-    useSessionPool: true,
-    persistCookiesPerSession: true,
-    sessionPoolOptions: {
-        maxPoolSize: 100,
-        sessionOptions: {
-            maxUsageCount: 15,
-            maxErrorScore: 1,
-        },
-    },
+    return {
+        ...generated,
+        'user-agent': userAgent,
+        accept: acceptJson
+            ? 'application/json,text/plain,*/*'
+            : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'accept-language': 'en-US,en;q=0.9',
+        'cache-control': 'no-cache',
+        pragma: 'no-cache',
+        referer: referer || `${BASE_URL}/`,
+        'sec-ch-ua': `"Chromium";v="${chromeVersion}", "Google Chrome";v="${chromeVersion}", "Not_A Brand";v="24"`,
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': acceptJson ? 'empty' : 'document',
+        'sec-fetch-mode': acceptJson ? 'cors' : 'navigate',
+        'sec-fetch-site': 'same-origin',
+    };
+};
 
-    // Pre-navigation: minimal delays, realistic headers
-    preNavigationHooks: [
-        async ({ request, session }) => {
-            // Initialize session with viewport
-            if (!session.userData.viewport) {
-                session.userData.viewport = getRandomViewport();
+const isBlockContent = (body) => {
+    const text = (body || '').toLowerCase();
+    return text.includes('captcha') || text.includes('access denied') || text.includes('are you human');
+};
+
+const fetchWithRetries = async ({
+    url,
+    referer,
+    proxyState,
+    sessionId,
+    acceptJson = false,
+    maxAttempts = 4,
+}) => {
+    let lastError;
+    let activeSession = sessionId;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        let proxyUrl;
+        try {
+            if (proxyState?.enabled && proxyState.configuration) {
+                proxyUrl = await proxyState.configuration.newUrl(activeSession);
             }
 
-            // Minimal human-like delay (fast but not instant)
-            const isDetail = request.userData?.label === 'DETAIL';
-            await sleep(randomDelay(isDetail ? 100 : 50, isDetail ? 400 : 200));
+            const response = await gotScraping({
+                url,
+                proxyUrl,
+                headers: createHeaders({ referer, acceptJson }),
+                timeout: { request: 20000 },
+                throwHttpErrors: false,
+                retry: { limit: 0 },
+                http2: true,
+            });
 
-            // Stealth headers
-            const referer = isDetail
-                ? 'https://www.simplyhired.com/search'
-                : 'https://www.google.com/';
-            request.headers = generateHeaders(session, referer);
-        },
-    ],
+            const body = response.body?.toString?.() || '';
+            const blocked = isBlockedStatus(response.statusCode) || (!acceptJson && isBlockContent(body));
+            if (!blocked || response.statusCode === 404) {
+                if (proxyState?.enabled && proxyUrl) proxyState.failures = 0;
+                return {
+                    statusCode: response.statusCode,
+                    body,
+                    headers: response.headers,
+                };
+            }
 
-    // Error handling
-    failedRequestHandler: async ({ request, error }) => {
-        log.debug(`Failed: ${request.url.substring(0, 60)}... - ${error?.message}`);
-    },
-});
+            lastError = new Error(`Blocked with status ${response.statusCode}`);
+            if (proxyState?.enabled && proxyUrl) {
+                proxyState.failures += 1;
+                if (proxyState.failures >= 3) {
+                    proxyState.enabled = false;
+                    log.warning('Disabling proxy after repeated blocked responses. Continuing without proxy.');
+                }
+            }
+        } catch (error) {
+            lastError = error;
+            if (proxyState?.enabled && isProxyError(error)) {
+                proxyState.failures += 1;
+                if (proxyState.failures >= 2) {
+                    proxyState.enabled = false;
+                    log.warning(`Disabling proxy after repeated proxy failures: ${error.message}`);
+                }
+            }
+        }
 
-// Attach config
-crawler.maxJobs = maxJobs;
+        if (attempt < maxAttempts) {
+            activeSession = `retry_${Date.now()}_${randomBetween(1000, 9999)}`;
+            await sleep(randomBetween(450 * attempt, 1000 * attempt));
+        }
+    }
 
-log.info(`Starting: target ${maxJobs} jobs, concurrency 10`);
-log.info(`URL: ${startUrl}`);
+    throw lastError || new Error(`Request failed: ${url}`);
+};
 
-await crawler.run([{ url: startUrl, label: 'LIST', userData: { currentPage: 1 } }]);
-log.info(`Complete: ${savedJobs} jobs saved`);
+const getNextDataPayloadFromHtml = (html) => {
+    const $ = loadHtml(html);
+    const raw = $('#__NEXT_DATA__').text();
+    if (!raw) return null;
 
-await Actor.exit();
+    try {
+        return JSON.parse(raw);
+    } catch {
+        return null;
+    }
+};
+
+const decodeJobPathFromEncodedUrl = (encodedUrl) => {
+    const decoded = tryDecodeURIComponent(encodedUrl || '');
+    if (!decoded) return '';
+
+    if (decoded.startsWith('http')) {
+        const parsed = new URL(decoded);
+        return parsed.pathname;
+    }
+
+    return decoded.split('?')[0];
+};
+
+const normalizeListJob = (rawJob, sourceSearchUrl) => {
+    const jobPath = rawJob.botUrl || decodeJobPathFromEncodedUrl(rawJob.encodedUrl) || '';
+    const salaryRaw = rawJob.salaryInfo;
+    const requirements = toUniqueArray(rawJob.requirements);
+    const uncategorized = toUniqueArray(rawJob.uncategorized);
+    const skills = toUniqueArray([...uncategorized, ...requirements]);
+
+    return {
+        job_key: cleanText(rawJob.jobKey),
+        title: cleanText(rawJob.title),
+        company: cleanText(rawJob.company),
+        location: cleanText(rawJob.location),
+        salary: cleanText(typeof salaryRaw === 'string' ? salaryRaw : ''),
+        snippet: cleanText(rawJob.snippet),
+        description_text: '',
+        description_html: '',
+        summary: cleanText(rawJob.snippet),
+        requirements,
+        skills,
+        benefits: Array.isArray(rawJob.benefits) ? rawJob.benefits : [],
+        job_type: Array.isArray(rawJob.jobTypes) ? rawJob.jobTypes.join(', ') : '',
+        remote_attributes: Array.isArray(rawJob.remoteAttributes) ? rawJob.remoteAttributes : [],
+        sponsored: Boolean(rawJob.sponsored),
+        company_rating: Number.isFinite(Number(rawJob.companyRating)) ? Number(rawJob.companyRating) : null,
+        date_posted: toIsoFromMs(rawJob.dateOnIndeed),
+        url: absoluteUrl(jobPath || ''),
+        company_page_url: absoluteUrl(rawJob.companyPageUrl || ''),
+        source_search_url: sourceSearchUrl,
+    };
+};
+
+const pickNextCursor = (pageCursors, currentPage, usedCursors) => {
+    if (!pageCursors || typeof pageCursors !== 'object') return null;
+
+    const direct = pageCursors[String(Number(currentPage) + 1)];
+    if (direct && !usedCursors.has(direct)) return direct;
+
+    const orderedCandidates = Object.entries(pageCursors)
+        .map(([key, cursor]) => ({ page: Number(key), cursor }))
+        .filter(({ page, cursor }) => Number.isFinite(page) && page > Number(currentPage) && cursor)
+        .sort((a, b) => a.page - b.page);
+
+    for (const candidate of orderedCandidates) {
+        if (!usedCursors.has(candidate.cursor)) {
+            return candidate.cursor;
+        }
+    }
+
+    for (const cursor of Object.values(pageCursors)) {
+        if (cursor && !usedCursors.has(cursor)) {
+            return cursor;
+        }
+    }
+
+    return null;
+};
+
+const buildSearchJsonUrl = (buildId, searchUrl, cursor) => {
+    const source = new URL(searchUrl);
+    const jsonUrl = new URL(`${BASE_URL}/_next/data/${buildId}/search.json`);
+
+    source.searchParams.forEach((value, key) => jsonUrl.searchParams.append(key, value));
+    if (cursor) jsonUrl.searchParams.set('cursor', cursor);
+    else jsonUrl.searchParams.delete('cursor');
+
+    return jsonUrl.toString();
+};
+
+const buildDetailJsonUrl = (buildId, jobKey) => (
+    `${BASE_URL}/_next/data/${buildId}/job/${encodeURIComponent(jobKey)}.json`
+);
+
+const runPool = async (items, concurrency, handler) => {
+    if (!items.length) return [];
+
+    const size = Math.max(1, Math.min(concurrency, items.length));
+    const results = new Array(items.length);
+    let index = 0;
+
+    const workers = Array.from({ length: size }, async () => {
+        while (true) {
+            const current = index;
+            index += 1;
+            if (current >= items.length) return;
+            results[current] = await handler(items[current], current);
+        }
+    });
+
+    await Promise.all(workers);
+    return results;
+};
+
+const enrichJobLongDescription = async ({ job, buildId, startUrl, proxyState }) => {
+    if (!job.job_key) return job;
+
+    try {
+        const response = await fetchWithRetries({
+            url: buildDetailJsonUrl(buildId, job.job_key),
+            referer: startUrl,
+            proxyState,
+            sessionId: `detail_${job.job_key.slice(0, 10)}_${randomBetween(1000, 9999)}`,
+            acceptJson: true,
+            maxAttempts: 3,
+        });
+
+        if (response.statusCode >= 400) {
+            return job;
+        }
+
+        const parsed = JSON.parse(response.body);
+        const pageProps = parsed?.pageProps || {};
+        const descriptionHtml = pageProps.jobDescriptionHtml || '';
+        const descriptionText = cleanText(descriptionHtml ? loadHtml(descriptionHtml).text() : '');
+
+        if (!descriptionText) return job;
+
+        return {
+            ...job,
+            description_html: descriptionHtml,
+            description_text: descriptionText,
+        };
+    } catch {
+        return job;
+    }
+};
+
+const scrapeSearch = async ({
+    startUrl,
+    maxPages,
+    maxJobs,
+    proxyState,
+    seenJobs,
+    state,
+}) => {
+    const bootstrapSession = `bootstrap_${Date.now()}_${randomBetween(1000, 9999)}`;
+    const bootstrap = await fetchWithRetries({
+        url: startUrl,
+        referer: `${BASE_URL}/`,
+        proxyState,
+        sessionId: bootstrapSession,
+        acceptJson: false,
+        maxAttempts: 5,
+    });
+
+    if (bootstrap.statusCode >= 400) {
+        throw new Error(`Failed to open search URL ${startUrl} (${bootstrap.statusCode})`);
+    }
+
+    const nextData = getNextDataPayloadFromHtml(bootstrap.body);
+    if (!nextData?.buildId || !nextData?.props?.pageProps) {
+        throw new Error(`No __NEXT_DATA__ found on ${startUrl}. Playwright fallback may be required for this query.`);
+    }
+
+    const buildId = nextData.buildId;
+    const usedCursors = new Set();
+    let pageProps = nextData.props.pageProps;
+    let currentPage = Number(pageProps.currentPageNumber) || 1;
+    let pagesFetched = 0;
+
+    log.info(`Search bootstrap OK. buildId=${buildId}, startPage=${currentPage}, startUrl=${startUrl}`);
+
+    while (pagesFetched < maxPages && state.saved < maxJobs) {
+        pagesFetched += 1;
+        state.pagesProcessed += 1;
+
+        const listJobs = Array.isArray(pageProps.jobs) ? pageProps.jobs : [];
+        const normalized = listJobs
+            .map((job) => normalizeListJob(job, startUrl))
+            .filter((job) => job.title && job.url);
+
+        const uniqueJobs = [];
+        for (const job of normalized) {
+            const uniqueKey = job.job_key || job.url;
+            if (!uniqueKey || seenJobs.has(uniqueKey)) continue;
+            seenJobs.add(uniqueKey);
+            uniqueJobs.push(job);
+            if (state.saved + uniqueJobs.length >= maxJobs) break;
+        }
+
+        if (uniqueJobs.length) {
+            const enrichedJobs = await runPool(uniqueJobs, DETAIL_CONCURRENCY, async (job) => enrichJobLongDescription({
+                job,
+                buildId,
+                startUrl,
+                proxyState,
+            }));
+
+            const withMeta = enrichedJobs.map((job) => ({
+                ...job,
+                description_text: job.description_text || '',
+                source: 'SimplyHired',
+                scraped_at: new Date().toISOString(),
+            }));
+
+            await Actor.pushData(withMeta);
+            state.saved += withMeta.length;
+        }
+
+        log.info([
+            `Page ${currentPage} processed`,
+            `jobsInPage=${listJobs.length}`,
+            `newJobs=${uniqueJobs.length}`,
+            `savedTotal=${state.saved}/${maxJobs}`,
+        ].join(' | '));
+
+        if (state.saved >= maxJobs) break;
+
+        const nextCursor = pickNextCursor(pageProps.pageCursors, currentPage, usedCursors);
+        if (!nextCursor) {
+            log.info(`No next cursor after page ${currentPage}.`);
+            break;
+        }
+
+        usedCursors.add(nextCursor);
+        const nextPageUrl = buildSearchJsonUrl(buildId, startUrl, nextCursor);
+        const nextResponse = await fetchWithRetries({
+            url: nextPageUrl,
+            referer: startUrl,
+            proxyState,
+            sessionId: `list_${Date.now()}_${randomBetween(1000, 9999)}`,
+            acceptJson: true,
+            maxAttempts: 4,
+        });
+
+        if (nextResponse.statusCode >= 400) {
+            log.warning(`Pagination request failed: ${nextResponse.statusCode} at page ${currentPage + 1}`);
+            break;
+        }
+
+        let parsed;
+        try {
+            parsed = JSON.parse(nextResponse.body);
+        } catch {
+            log.warning(`Could not parse pagination JSON at page ${currentPage + 1}`);
+            break;
+        }
+
+        if (!parsed?.pageProps) {
+            log.warning(`Missing pageProps in pagination response at page ${currentPage + 1}`);
+            break;
+        }
+
+        pageProps = parsed.pageProps;
+        currentPage = Number(pageProps.currentPageNumber) || (currentPage + 1);
+        await sleep(randomBetween(120, 320));
+    }
+};
+
+await Actor.init();
+
+try {
+    const input = (await Actor.getInput()) ?? {};
+    const maxJobs = Number(input.results_wanted ?? 20);
+    const maxPages = Number(input.max_pages ?? Math.max(10, Math.ceil(maxJobs / 20) + 5));
+
+    if (!Number.isFinite(maxJobs) || maxJobs < 1) {
+        throw new Error('Input "results_wanted" must be an integer >= 1.');
+    }
+    if (!Number.isFinite(maxPages) || maxPages < 1) {
+        throw new Error('Input "max_pages" must be an integer >= 1.');
+    }
+
+    const startUrls = getStartUrls(input);
+    const proxyState = await createProxyState(input.proxyConfiguration);
+
+    const state = {
+        pagesProcessed: 0,
+        saved: 0,
+    };
+    const seenJobs = new Set();
+
+    log.info([
+        'Starting SimplyHired actor',
+        `targetJobs=${maxJobs}`,
+        `maxPages=${maxPages}`,
+        'mode=api_list_and_detail',
+        `proxy=${proxyState.enabled ? 'enabled' : 'disabled'}`,
+        `startUrls=${startUrls.length}`,
+    ].join(' | '));
+
+    for (const startUrl of startUrls) {
+        if (state.saved >= maxJobs) break;
+        await scrapeSearch({
+            startUrl,
+            maxPages,
+            maxJobs,
+            proxyState,
+            seenJobs,
+            state,
+        });
+    }
+
+    log.info(`Finished. savedJobs=${state.saved}, pagesProcessed=${state.pagesProcessed}`);
+} finally {
+    await Actor.exit();
+}

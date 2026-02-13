@@ -1,6 +1,6 @@
 {
   "name": "simplyhired-jobs-actor-lite",
-  "version": "1.0.0",
+  "version": "1.0",
   "description": "Lightweight SimplyHired.com jobs scraper using Cheerio.",
   "type": "module",
   "dependencies": {
