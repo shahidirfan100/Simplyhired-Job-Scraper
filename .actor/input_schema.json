@@ -50,10 +50,7 @@
       "description": "Proxy settings. Uses Apify Proxy by default. If your selected proxy group is unavailable, the actor will continue without proxy.",
       "editor": "proxy",
       "default": {
-        "useApifyProxy": true
-      },
-      "prefill": {
-        "useApifyProxy": true
+        "useApifyProxy": false
       }
     }
   },
