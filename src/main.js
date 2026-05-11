@@ -1,11 +1,14 @@
-import { Actor } from 'apify';
-import log from '@apify/log';
+import { readFile } from 'node:fs/promises';
+
+import { Actor, log } from 'apify';
 import { load as loadHtml } from 'cheerio';
 import { gotScraping } from 'got-scraping';
 import { HeaderGenerator } from 'header-generator';
 
 const BASE_URL = 'https://www.simplyhired.com';
-const DETAIL_CONCURRENCY = 8;
+const DEFAULT_KEYWORD = 'software engineer';
+const DEFAULT_LOCATION = 'USA';
+const DETAIL_CONCURRENCY = 5;
 const headerGenerator = new HeaderGenerator({
     browsers: [
         { name: 'chrome', minVersion: 120, maxVersion: 132 },
@@ -16,9 +19,17 @@ const headerGenerator = new HeaderGenerator({
     locales: ['en-US', 'en'],
 });
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise((resolve) => {
+    setTimeout(resolve, ms);
+});
 const randomBetween = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 const cleanText = (value) => (value || '').toString().replace(/\s+/g, ' ').trim();
+const escapeHtml = (value) => value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('\'', '&#39;');
 const toUniqueArray = (values) => {
     if (!Array.isArray(values)) return [];
     const out = [];
@@ -65,14 +76,63 @@ const buildSearchUrl = (keyword, location) => {
     return `${BASE_URL}/search?${params.toString()}`;
 };
 
-const getStartUrls = (input) => {
-    if (!Array.isArray(input.startUrls) || !input.startUrls.length) {
-        return [buildSearchUrl(input.keyword || 'software engineer', input.location || 'USA')];
+const isNonEmptyObject = (value) => (
+    Boolean(value)
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.keys(value).length > 0
+);
+
+const loadLocalFallbackInput = async () => {
+    const candidates = ['INPUT.json'];
+
+    for (const filePath of candidates) {
+        try {
+            const raw = await readFile(filePath, 'utf8');
+            let data;
+            try {
+                data = JSON.parse(raw);
+            } catch {
+                continue;
+            }
+
+            if (isNonEmptyObject(data)) {
+                log.info(`Using local fallback input from ${filePath}.`);
+                return data;
+            }
+        } catch {
+            // Ignore missing local fallback files.
+        }
     }
 
-    return input.startUrls
-        .map((item) => (typeof item === 'string' ? item : item?.url))
-        .filter(Boolean);
+    return {};
+};
+
+const toValidUrl = (value) => {
+    if (!value) return '';
+
+    try {
+        const parsed = new URL(value, BASE_URL);
+        if (!/^https?:$/.test(parsed.protocol)) return '';
+        return parsed.toString();
+    } catch {
+        return '';
+    }
+};
+
+const getStartUrls = (input) => {
+    const provided = Array.isArray(input.startUrls)
+        ? input.startUrls
+            .map((item) => (typeof item === 'string' ? item : item?.url))
+            .map((url) => toValidUrl(url))
+            .filter(Boolean)
+        : [];
+
+    if (provided.length) {
+        return provided;
+    }
+
+    return [buildSearchUrl(input.keyword, input.location)];
 };
 
 const normalizeProxyInput = (proxyConfigurationInput) => {
@@ -163,6 +223,61 @@ const isBlockContent = (body) => {
     return text.includes('captcha') || text.includes('access denied') || text.includes('are you human');
 };
 
+const isHtmlResponse = (body, headers) => {
+    const contentType = String(headers?.['content-type'] || '').toLowerCase();
+    const trimmed = (body || '').trim().toLowerCase();
+
+    return contentType.includes('text/html')
+        || trimmed.startsWith('<!doctype')
+        || trimmed.startsWith('<html');
+};
+
+const tryParseJson = (body) => {
+    try {
+        return { data: JSON.parse(body), error: null };
+    } catch (error) {
+        return { data: null, error };
+    }
+};
+
+const getPageProps = (payload) => (
+    payload?.pageProps
+    || payload?.props?.pageProps
+    || payload?.data?.pageProps
+    || null
+);
+
+const pickArray = (...candidates) => {
+    for (const candidate of candidates) {
+        if (Array.isArray(candidate)) return candidate;
+    }
+    return [];
+};
+
+const extractJobsArray = (pageProps) => pickArray(
+    pageProps?.jobs,
+    pageProps?.jobResults,
+    pageProps?.results,
+    pageProps?.searchResults?.jobs,
+    pageProps?.searchResults?.results,
+);
+
+const extractPageCursors = (pageProps) => (
+    pageProps?.pageCursors
+    || pageProps?.pagination?.pageCursors
+    || pageProps?.searchResults?.pageCursors
+    || null
+);
+
+const extractCurrentPage = (pageProps, fallbackPage) => {
+    const candidate = Number(
+        pageProps?.currentPageNumber
+        ?? pageProps?.pagination?.currentPage
+        ?? pageProps?.searchResults?.currentPage
+    );
+    return Number.isFinite(candidate) && candidate > 0 ? candidate : fallbackPage;
+};
+
 const fetchWithRetries = async ({
     url,
     referer,
@@ -173,12 +288,13 @@ const fetchWithRetries = async ({
 }) => {
     let lastError;
     let activeSession = sessionId;
+    const proxy = proxyState;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         let proxyUrl;
         try {
-            if (proxyState?.enabled && proxyState.configuration) {
-                proxyUrl = await proxyState.configuration.newUrl(activeSession);
+            if (proxy?.enabled && proxy.configuration) {
+                proxyUrl = await proxy.configuration.newUrl(activeSession);
             }
 
             const response = await gotScraping({
@@ -192,9 +308,17 @@ const fetchWithRetries = async ({
             });
 
             const body = response.body?.toString?.() || '';
-            const blocked = isBlockedStatus(response.statusCode) || (!acceptJson && isBlockContent(body));
+            const htmlWhenJsonExpected = acceptJson && isHtmlResponse(body, response.headers);
+            const blocked = isBlockedStatus(response.statusCode)
+                || (!acceptJson && isBlockContent(body))
+                || htmlWhenJsonExpected;
+
+            if (htmlWhenJsonExpected) {
+                log.warning(`Expected JSON but received HTML for ${url}. Retrying with a fresh session.`);
+            }
+
             if (!blocked || response.statusCode === 404) {
-                if (proxyState?.enabled && proxyUrl) proxyState.failures = 0;
+                if (proxy?.enabled && proxyUrl) proxy.failures = 0;
                 return {
                     statusCode: response.statusCode,
                     body,
@@ -203,19 +327,19 @@ const fetchWithRetries = async ({
             }
 
             lastError = new Error(`Blocked with status ${response.statusCode}`);
-            if (proxyState?.enabled && proxyUrl) {
-                proxyState.failures += 1;
-                if (proxyState.failures >= 3) {
-                    proxyState.enabled = false;
+            if (proxy?.enabled && proxyUrl) {
+                proxy.failures += 1;
+                if (proxy.failures >= 3) {
+                    proxy.enabled = false;
                     log.warning('Disabling proxy after repeated blocked responses. Continuing without proxy.');
                 }
             }
         } catch (error) {
             lastError = error;
-            if (proxyState?.enabled && isProxyError(error)) {
-                proxyState.failures += 1;
-                if (proxyState.failures >= 2) {
-                    proxyState.enabled = false;
+            if (proxy?.enabled && isProxyError(error)) {
+                proxy.failures += 1;
+                if (proxy.failures >= 2) {
+                    proxy.enabled = false;
                     log.warning(`Disabling proxy after repeated proxy failures: ${error.message}`);
                 }
             }
@@ -233,13 +357,19 @@ const fetchWithRetries = async ({
 const getNextDataPayloadFromHtml = (html) => {
     const $ = loadHtml(html);
     const raw = $('#__NEXT_DATA__').text();
-    if (!raw) return null;
-
-    try {
-        return JSON.parse(raw);
-    } catch {
-        return null;
+    if (raw) {
+        const parsed = tryParseJson(raw).data;
+        if (parsed) return parsed;
     }
+
+    const scriptMatch = html.match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
+    if (!scriptMatch?.[1]) return null;
+
+    const parsed = tryParseJson(scriptMatch[1]).data;
+    if (!parsed) {
+        log.warning('Found __NEXT_DATA__ script but JSON parsing failed.');
+    }
+    return parsed;
 };
 
 const decodeJobPathFromEncodedUrl = (encodedUrl) => {
@@ -247,19 +377,26 @@ const decodeJobPathFromEncodedUrl = (encodedUrl) => {
     if (!decoded) return '';
 
     if (decoded.startsWith('http')) {
-        const parsed = new URL(decoded);
-        return parsed.pathname;
+        try {
+            const parsed = new URL(decoded);
+            return parsed.pathname;
+        } catch {
+            return decoded.split('?')[0];
+        }
     }
 
     return decoded.split('?')[0];
 };
 
 const normalizeListJob = (rawJob, sourceSearchUrl) => {
+    if (!rawJob || typeof rawJob !== 'object') return null;
+
     const jobPath = rawJob.botUrl || decodeJobPathFromEncodedUrl(rawJob.encodedUrl) || '';
     const salaryRaw = rawJob.salaryInfo;
     const requirements = toUniqueArray(rawJob.requirements);
     const uncategorized = toUniqueArray(rawJob.uncategorized);
     const skills = toUniqueArray([...uncategorized, ...requirements]);
+    const snippet = cleanText(rawJob.snippet);
 
     return {
         job_key: cleanText(rawJob.jobKey),
@@ -267,10 +404,10 @@ const normalizeListJob = (rawJob, sourceSearchUrl) => {
         company: cleanText(rawJob.company),
         location: cleanText(rawJob.location),
         salary: cleanText(typeof salaryRaw === 'string' ? salaryRaw : ''),
-        snippet: cleanText(rawJob.snippet),
-        description_text: '',
-        description_html: '',
-        summary: cleanText(rawJob.snippet),
+        snippet,
+        description_text: snippet,
+        description_html: snippet ? `<p>${escapeHtml(snippet)}</p>` : '',
+        summary: snippet,
         requirements,
         skills,
         benefits: Array.isArray(rawJob.benefits) ? rawJob.benefits : [],
@@ -312,7 +449,7 @@ const pickNextCursor = (pageCursors, currentPage, usedCursors) => {
 };
 
 const buildSearchJsonUrl = (buildId, searchUrl, cursor) => {
-    const source = new URL(searchUrl);
+    const source = new URL(searchUrl, BASE_URL);
     const jsonUrl = new URL(`${BASE_URL}/_next/data/${buildId}/search.json`);
 
     source.searchParams.forEach((value, key) => jsonUrl.searchParams.append(key, value));
@@ -325,6 +462,73 @@ const buildSearchJsonUrl = (buildId, searchUrl, cursor) => {
 const buildDetailJsonUrl = (buildId, jobKey) => (
     `${BASE_URL}/_next/data/${buildId}/job/${encodeURIComponent(jobKey)}.json`
 );
+
+const pickDescriptionCandidates = (value) => {
+    if (!value) return [];
+
+    const out = [];
+    const stack = [value];
+    let visited = 0;
+    const maxVisited = 8000;
+
+    while (stack.length && visited <= maxVisited) {
+        const current = stack.pop();
+        visited += 1;
+
+        if (!current) continue;
+
+        if (typeof current === 'string') {
+            if (cleanText(current).length >= 80) out.push(current);
+            continue;
+        }
+
+        if (Array.isArray(current)) {
+            for (const item of current) stack.push(item);
+            continue;
+        }
+
+        if (typeof current !== 'object') continue;
+
+        for (const [key, child] of Object.entries(current)) {
+            const lowerKey = key.toLowerCase();
+            if (typeof child === 'string' && (
+                lowerKey.includes('description')
+                || lowerKey.includes('about')
+                || lowerKey.includes('summary')
+                || lowerKey.includes('details')
+            )) {
+                if (cleanText(child).length >= 80) out.push(child);
+            }
+            stack.push(child);
+        }
+    }
+
+    return out;
+};
+
+const selectLongestCandidate = (candidates) => {
+    if (!Array.isArray(candidates) || !candidates.length) return null;
+    return candidates.sort((a, b) => cleanText(b).length - cleanText(a).length)[0] || null;
+};
+
+const toDescriptionPair = (candidate, fallbackSnippet) => {
+    const fallbackText = cleanText(fallbackSnippet);
+    const fallbackHtml = fallbackText ? `<p>${escapeHtml(fallbackText)}</p>` : '';
+    if (!candidate) {
+        return { descriptionText: fallbackText, descriptionHtml: fallbackHtml };
+    }
+
+    const raw = candidate.toString();
+    const hasHtml = /<[^>]+>/.test(raw);
+    const descriptionHtml = hasHtml ? raw : `<p>${escapeHtml(raw)}</p>`;
+    const descriptionText = cleanText(hasHtml ? loadHtml(raw).text() : raw);
+
+    if (descriptionText) {
+        return { descriptionText, descriptionHtml };
+    }
+
+    return { descriptionText: fallbackText, descriptionHtml: fallbackHtml };
+};
 
 const runPool = async (items, concurrency, handler) => {
     if (!items.length) return [];
@@ -350,6 +554,8 @@ const enrichJobLongDescription = async ({ job, buildId, startUrl, proxyState }) 
     if (!job.job_key) return job;
 
     try {
+        let bestCandidate = null;
+
         const response = await fetchWithRetries({
             url: buildDetailJsonUrl(buildId, job.job_key),
             referer: startUrl,
@@ -359,21 +565,26 @@ const enrichJobLongDescription = async ({ job, buildId, startUrl, proxyState }) 
             maxAttempts: 3,
         });
 
-        if (response.statusCode >= 400) {
-            return job;
+        if (response.statusCode < 400) {
+            const { data: parsed } = tryParseJson(response.body);
+            if (parsed) {
+                const pageProps = getPageProps(parsed) || {};
+                const directDescription = pageProps.jobDescriptionHtml
+                    || pageProps?.job?.jobDescriptionHtml
+                    || pageProps?.job?.descriptionHtml
+                    || pageProps?.job?.description
+                    || pageProps?.jobDescription;
+                const scanned = selectLongestCandidate(pickDescriptionCandidates(parsed));
+                bestCandidate = directDescription || scanned;
+            }
         }
 
-        const parsed = JSON.parse(response.body);
-        const pageProps = parsed?.pageProps || {};
-        const descriptionHtml = pageProps.jobDescriptionHtml || '';
-        const descriptionText = cleanText(descriptionHtml ? loadHtml(descriptionHtml).text() : '');
-
-        if (!descriptionText) return job;
+        const { descriptionText, descriptionHtml } = toDescriptionPair(bestCandidate, job.snippet);
 
         return {
             ...job,
-            description_html: descriptionHtml,
-            description_text: descriptionText,
+            description_html: descriptionHtml || job.description_html || '',
+            description_text: descriptionText || job.description_text || '',
         };
     } catch {
         return job;
@@ -403,25 +614,34 @@ const scrapeSearch = async ({
     }
 
     const nextData = getNextDataPayloadFromHtml(bootstrap.body);
-    if (!nextData?.buildId || !nextData?.props?.pageProps) {
+    const initialPageProps = getPageProps(nextData);
+    if (!nextData?.buildId || !initialPageProps) {
         throw new Error(`No __NEXT_DATA__ found on ${startUrl}. Playwright fallback may be required for this query.`);
     }
 
-    const buildId = nextData.buildId;
+    const { buildId } = nextData;
     const usedCursors = new Set();
-    let pageProps = nextData.props.pageProps;
-    let currentPage = Number(pageProps.currentPageNumber) || 1;
+    let pageProps = initialPageProps;
+    let currentPage = extractCurrentPage(pageProps, 1);
     let pagesFetched = 0;
+    let noProgressPages = 0;
+    const progress = state;
 
     log.info(`Search bootstrap OK. buildId=${buildId}, startPage=${currentPage}, startUrl=${startUrl}`);
 
-    while (pagesFetched < maxPages && state.saved < maxJobs) {
+    while (pagesFetched < maxPages && progress.saved < maxJobs) {
         pagesFetched += 1;
-        state.pagesProcessed += 1;
+        progress.pagesProcessed += 1;
 
-        const listJobs = Array.isArray(pageProps.jobs) ? pageProps.jobs : [];
+        const listJobs = extractJobsArray(pageProps);
+        if (!listJobs.length) {
+            log.warning(`No jobs array found on page ${currentPage}. Stopping this search URL.`);
+            break;
+        }
+
         const normalized = listJobs
             .map((job) => normalizeListJob(job, startUrl))
+            .filter(Boolean)
             .filter((job) => job.title && job.url);
 
         const uniqueJobs = [];
@@ -430,7 +650,7 @@ const scrapeSearch = async ({
             if (!uniqueKey || seenJobs.has(uniqueKey)) continue;
             seenJobs.add(uniqueKey);
             uniqueJobs.push(job);
-            if (state.saved + uniqueJobs.length >= maxJobs) break;
+            if (progress.saved + uniqueJobs.length >= maxJobs) break;
         }
 
         if (uniqueJobs.length) {
@@ -449,19 +669,26 @@ const scrapeSearch = async ({
             }));
 
             await Actor.pushData(withMeta);
-            state.saved += withMeta.length;
+            progress.saved += withMeta.length;
+            noProgressPages = 0;
+        } else {
+            noProgressPages += 1;
         }
 
         log.info([
             `Page ${currentPage} processed`,
             `jobsInPage=${listJobs.length}`,
             `newJobs=${uniqueJobs.length}`,
-            `savedTotal=${state.saved}/${maxJobs}`,
+            `savedTotal=${progress.saved}/${maxJobs}`,
         ].join(' | '));
 
-        if (state.saved >= maxJobs) break;
+        if (progress.saved >= maxJobs) break;
+        if (noProgressPages >= 3) {
+            log.warning(`No new jobs found for ${noProgressPages} pages in a row. Stopping to avoid endless pagination.`);
+            break;
+        }
 
-        const nextCursor = pickNextCursor(pageProps.pageCursors, currentPage, usedCursors);
+        const nextCursor = pickNextCursor(extractPageCursors(pageProps), currentPage, usedCursors);
         if (!nextCursor) {
             log.info(`No next cursor after page ${currentPage}.`);
             break;
@@ -483,21 +710,20 @@ const scrapeSearch = async ({
             break;
         }
 
-        let parsed;
-        try {
-            parsed = JSON.parse(nextResponse.body);
-        } catch {
+        const { data: parsed } = tryParseJson(nextResponse.body);
+        if (!parsed) {
             log.warning(`Could not parse pagination JSON at page ${currentPage + 1}`);
             break;
         }
 
-        if (!parsed?.pageProps) {
+        const nextPageProps = getPageProps(parsed);
+        if (!nextPageProps) {
             log.warning(`Missing pageProps in pagination response at page ${currentPage + 1}`);
             break;
         }
 
-        pageProps = parsed.pageProps;
-        currentPage = Number(pageProps.currentPageNumber) || (currentPage + 1);
+        pageProps = nextPageProps;
+        currentPage = extractCurrentPage(pageProps, currentPage + 1);
         await sleep(randomBetween(120, 320));
     }
 };
@@ -505,8 +731,15 @@ const scrapeSearch = async ({
 await Actor.init();
 
 try {
-    const input = (await Actor.getInput()) ?? {};
-    const maxJobs = Number(input.results_wanted ?? 20);
+    const actorInput = (await Actor.getInput()) ?? {};
+    const input = isNonEmptyObject(actorInput) ? actorInput : await loadLocalFallbackInput();
+    const normalizedInput = {
+        ...input,
+        keyword: cleanText(input.keyword) || DEFAULT_KEYWORD,
+        location: cleanText(input.location) || DEFAULT_LOCATION,
+    };
+
+    const maxJobs = Number(normalizedInput.results_wanted ?? 20);
     const maxPages = Number(input.max_pages ?? Math.max(10, Math.ceil(maxJobs / 20) + 5));
 
     if (!Number.isFinite(maxJobs) || maxJobs < 1) {
@@ -516,8 +749,11 @@ try {
         throw new Error('Input "max_pages" must be an integer >= 1.');
     }
 
-    const startUrls = getStartUrls(input);
-    const proxyState = await createProxyState(input.proxyConfiguration);
+    const startUrls = getStartUrls(normalizedInput);
+    if (!startUrls.length) {
+        throw new Error('No valid start URLs could be built from the provided input.');
+    }
+    const proxyState = await createProxyState(normalizedInput.proxyConfiguration);
 
     const state = {
         pagesProcessed: 0,
@@ -544,6 +780,10 @@ try {
             seenJobs,
             state,
         });
+    }
+
+    if (state.saved === 0) {
+        throw new Error('No jobs were extracted. Check input query/start URL or possible upstream API/response changes.');
     }
 
     log.info(`Finished. savedJobs=${state.saved}, pagesProcessed=${state.pagesProcessed}`);

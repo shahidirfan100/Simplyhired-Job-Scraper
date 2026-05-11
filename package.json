@@ -1,14 +1,14 @@
 {
-  "name": "simplyhired-jobs-actor-lite",
+  "name": "simplyhired-jobs-actor",
   "version": "1.0",
   "description": "Lightweight SimplyHired.com jobs scraper using Cheerio.",
   "type": "module",
   "dependencies": {
-    "apify": "^3.5.2",
-    "crawlee": "^3.15.3",
-    "cheerio": "^1.0.0-rc.12",
-    "got-scraping": "^4.1.2",
-    "header-generator": "^2.1.27"
+    "apify": "^3.7.0",
+    "cheerio": "^1.2.0",
+    "crawlee": "^3.16.0",
+    "got-scraping": "^4.2.1",
+    "header-generator": "^2.1.80"
   },
   "scripts": {
     "start": "node src/main.js",
@@ -19,5 +19,11 @@
     "test": "echo \"Error: oops, the Actor has no tests yet, sad!\" && exit 1"
   },
   "author": "Shahid Irfan",
-  "license": "ISC"
+  "license": "ISC",
+  "devDependencies": {
+    "@apify/eslint-config": "^2.0.6",
+    "eslint": "^9.39.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.3"
+  }
 }

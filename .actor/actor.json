@@ -1,10 +1,7 @@
 {
   "actorSpecification": 1,
-  "name": "simplyhired-jobs-scraper",
+  "name": "simplyhired-scraper",
   "version": "1.0",
-  "meta": {
-    "generatedBy": "gpt-5-codex"
-  },
   "buildTag": "latest",
   "dockerfile": "../Dockerfile",
   "readme": "../README.md",

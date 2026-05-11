@@ -15,6 +15,7 @@
       "type": "string",
       "description": "Job search keyword (e.g., 'software engineer', 'data scientist', 'nurse').",
       "editor": "textfield",
+      "default": "software engineer",
       "prefill": "software engineer"
     },
     "location": {
@@ -22,14 +23,13 @@
       "type": "string",
       "description": "Geographic location for job search (e.g., 'New York, NY', 'Los Angeles', 'Remote').",
       "editor": "textfield",
+      "default": "USA",
       "prefill": "USA"
     },
     "results_wanted": {
       "title": "Maximum jobs to scrape",
       "type": "integer",
       "description": "Maximum number of job listings to collect.",
-      "minimum": 1,
-      "maximum": 5000,
       "default": 20,
       "prefill": 20,
       "editor": "number"
@@ -38,10 +38,8 @@
       "title": "Maximum pages",
       "type": "integer",
       "description": "Maximum number of pagination pages to visit (used as a hard safety cap).",
-      "minimum": 1,
-      "maximum": 1000,
-      "default": 250,
-      "prefill": 250,
+      "default": 2,
+      "prefill": 2,
       "editor": "number"
     },
     "proxyConfiguration": {
