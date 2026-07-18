@@ -2,22 +2,29 @@ import { readFile } from 'node:fs/promises';
 
 import { Actor, log } from 'apify';
 import { load as loadHtml } from 'cheerio';
-import { gotScraping } from 'got-scraping';
-import { HeaderGenerator } from 'header-generator';
+import { Impit } from 'impit';
 
 const BASE_URL = 'https://www.simplyhired.com';
-const DEFAULT_KEYWORD = 'software engineer';
-const DEFAULT_LOCATION = 'USA';
 const DETAIL_CONCURRENCY = 5;
-const headerGenerator = new HeaderGenerator({
-    browsers: [
-        { name: 'chrome', minVersion: 120, maxVersion: 132 },
-        { name: 'firefox', minVersion: 115, maxVersion: 131 },
-    ],
-    devices: ['desktop'],
-    operatingSystems: ['windows', 'macos'],
-    locales: ['en-US', 'en'],
-});
+const REQUEST_TIMEOUT_MS = 20000;
+const PAGE_PROGRESS_LOG_INTERVAL = 10;
+const MAX_AUTO_PAGE_BUDGET = 250;
+const RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const ALLOWED_DESCRIPTION_TAGS = new Set(['p', 'br', 'strong', 'b', 'em', 'i', 'ul', 'ol', 'li']);
+const impitClients = new Map();
+
+const getImpitClient = (proxyUrl, sessionKey = '') => {
+    const key = proxyUrl || sessionKey || 'direct';
+    if (!impitClients.has(key)) {
+        impitClients.set(key, new Impit({
+            browser: 'chrome',
+            ignoreTlsErrors: true,
+            ...(proxyUrl && { proxyUrl }),
+        }));
+    }
+
+    return impitClients.get(key);
+};
 
 const sleep = (ms) => new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -47,6 +54,40 @@ const toUniqueArray = (values) => {
     return out;
 };
 const isBlockedStatus = (status) => status === 403 || status === 429 || status === 503;
+const isRetryableStatus = (status) => RETRYABLE_STATUS_CODES.has(Number(status));
+const getObjectValue = (value, ...keys) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+
+    for (const key of keys) {
+        if (Object.hasOwn(value, key)) return value[key];
+
+        const lowerKey = key.toLowerCase();
+        const match = Object.keys(value).find((candidate) => candidate.toLowerCase() === lowerKey);
+        if (match) return value[match];
+    }
+
+    return undefined;
+};
+const getSearchParam = (params, key) => {
+    const lowerKey = key.toLowerCase();
+    for (const [candidate, value] of params.entries()) {
+        if (candidate.toLowerCase() === lowerKey) return value;
+    }
+
+    return '';
+};
+const parseRetryAfterMs = (headers) => {
+    const retryAfter = getObjectValue(headers, 'retry-after');
+    if (!retryAfter) return 0;
+
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds * 1000, 10000);
+
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) return Math.min(Math.max(retryAt - Date.now(), 0), 10000);
+
+    return 0;
+};
 const toIsoFromMs = (value) => {
     const n = Number(value);
     if (!Number.isFinite(n) || n <= 0) return '';
@@ -54,10 +95,14 @@ const toIsoFromMs = (value) => {
 };
 
 const absoluteUrl = (value) => {
-    if (!value) return '';
-    if (value.startsWith('http://') || value.startsWith('https://')) return value;
-    if (value.startsWith('/')) return `${BASE_URL}${value}`;
-    return `${BASE_URL}/${value}`;
+    const cleaned = cleanText(value);
+    if (!cleaned) return '';
+
+    try {
+        return new URL(cleaned, BASE_URL).toString();
+    } catch {
+        return '';
+    }
 };
 
 const tryDecodeURIComponent = (value) => {
@@ -74,6 +119,54 @@ const buildSearchUrl = (keyword, location) => {
     if (keyword) params.set('q', keyword.trim());
     if (location) params.set('l', location.trim());
     return `${BASE_URL}/search?${params.toString()}`;
+};
+
+const toPositiveInteger = (value, fallback, fieldName) => {
+    if (value === undefined || value === null || value === '') return fallback;
+
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed) && parsed >= 1) return parsed;
+
+    log.warning(`Invalid "${fieldName}" value "${value}". Using ${fallback}.`);
+    return fallback;
+};
+const getPageBudget = (requestedPages, maxJobs) => {
+    const duplicateTolerantPages = Math.ceil(maxJobs / 5);
+    return Math.min(Math.max(requestedPages, duplicateTolerantPages), MAX_AUTO_PAGE_BUDGET);
+};
+
+const normalizeSearchUrl = (value) => {
+    const cleaned = cleanText(value);
+    if (!cleaned) return '';
+
+    try {
+        const parsed = new URL(cleaned, BASE_URL);
+        const host = parsed.hostname.toLowerCase();
+        if (!/^https?:$/.test(parsed.protocol)) return '';
+        if (host !== 'simplyhired.com' && !host.endsWith('.simplyhired.com')) return '';
+
+        parsed.hash = '';
+        if (!parsed.pathname || parsed.pathname === '/') parsed.pathname = '/search';
+        return parsed.toString();
+    } catch {
+        return '';
+    }
+};
+
+const buildSearchUrlFallbacks = (url, input) => {
+    const normalized = normalizeSearchUrl(url);
+    if (!normalized) return [];
+
+    const parsed = new URL(normalized);
+    const keyword = cleanText(getSearchParam(parsed.searchParams, 'q') || input.keyword);
+    const location = cleanText(getSearchParam(parsed.searchParams, 'l') || input.location);
+    const out = [normalized];
+
+    if (keyword || location) {
+        out.push(buildSearchUrl(keyword, location));
+    }
+
+    return out;
 };
 
 const isNonEmptyObject = (value) => (
@@ -108,28 +201,24 @@ const loadLocalFallbackInput = async () => {
     return {};
 };
 
-const toValidUrl = (value) => {
-    if (!value) return '';
-
-    try {
-        const parsed = new URL(value, BASE_URL);
-        if (!/^https?:$/.test(parsed.protocol)) return '';
-        return parsed.toString();
-    } catch {
-        return '';
-    }
-};
-
 const getStartUrls = (input) => {
-    const provided = Array.isArray(input.startUrls)
-        ? input.startUrls
-            .map((item) => (typeof item === 'string' ? item : item?.url))
-            .map((url) => toValidUrl(url))
-            .filter(Boolean)
-        : [];
+    let startUrlItems = [];
+    if (Array.isArray(input.startUrls)) {
+        startUrlItems = input.startUrls;
+    } else if (input.startUrls) {
+        startUrlItems = [input.startUrls];
+    }
+    const provided = startUrlItems
+        .map((item) => (typeof item === 'string' ? item : item?.url))
+        .flatMap((url) => buildSearchUrlFallbacks(url, input))
+        .filter(Boolean);
+
+    if (startUrlItems.length && !provided.length) {
+        log.warning('No valid SimplyHired start URLs found in input. Falling back to keyword/location search.');
+    }
 
     if (provided.length) {
-        return provided;
+        return [...new Set(provided)];
     }
 
     return [buildSearchUrl(input.keyword, input.location)];
@@ -137,7 +226,7 @@ const getStartUrls = (input) => {
 
 const normalizeProxyInput = (proxyConfigurationInput) => {
     if (!proxyConfigurationInput || typeof proxyConfigurationInput !== 'object') {
-        return { useApifyProxy: true };
+        return { useApifyProxy: Actor.isAtHome() };
     }
 
     const normalized = { ...proxyConfigurationInput };
@@ -189,33 +278,13 @@ const createProxyState = async (proxyConfigurationInput) => {
         const configuration = await Actor.createProxyConfiguration(normalized);
         return { configuration, enabled: true, failures: 0 };
     } catch (error) {
+        if (Actor.isAtHome()) {
+            throw new Error(`Proxy initialization failed on Apify Cloud: ${error.message}`);
+        }
+
         log.warning(`Proxy initialization failed, continuing without proxy: ${error.message}`);
         return { configuration: null, enabled: false, failures: 0 };
     }
-};
-
-const createHeaders = ({ referer, acceptJson = false }) => {
-    const generated = headerGenerator.getHeaders();
-    const userAgent = generated['user-agent'] || generated['User-Agent'];
-    const chromeVersion = (userAgent?.match(/Chrome\/(\d+)/)?.[1]) || '132';
-
-    return {
-        ...generated,
-        'user-agent': userAgent,
-        accept: acceptJson
-            ? 'application/json,text/plain,*/*'
-            : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'accept-language': 'en-US,en;q=0.9',
-        'cache-control': 'no-cache',
-        pragma: 'no-cache',
-        referer: referer || `${BASE_URL}/`,
-        'sec-ch-ua': `"Chromium";v="${chromeVersion}", "Google Chrome";v="${chromeVersion}", "Not_A Brand";v="24"`,
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'sec-fetch-dest': acceptJson ? 'empty' : 'document',
-        'sec-fetch-mode': acceptJson ? 'cors' : 'navigate',
-        'sec-fetch-site': 'same-origin',
-    };
 };
 
 const isBlockContent = (body) => {
@@ -234,16 +303,16 @@ const isHtmlResponse = (body, headers) => {
 
 const tryParseJson = (body) => {
     try {
-        return { data: JSON.parse(body), error: null };
+        return { data: JSON.parse((body || '').trim()), error: null };
     } catch (error) {
         return { data: null, error };
     }
 };
 
 const getPageProps = (payload) => (
-    payload?.pageProps
-    || payload?.props?.pageProps
-    || payload?.data?.pageProps
+    getObjectValue(payload, 'pageProps')
+    || getObjectValue(getObjectValue(payload, 'props'), 'pageProps')
+    || getObjectValue(getObjectValue(payload, 'data'), 'pageProps')
     || null
 );
 
@@ -255,108 +324,34 @@ const pickArray = (...candidates) => {
 };
 
 const extractJobsArray = (pageProps) => pickArray(
-    pageProps?.jobs,
-    pageProps?.jobResults,
-    pageProps?.results,
-    pageProps?.searchResults?.jobs,
-    pageProps?.searchResults?.results,
+    getObjectValue(pageProps, 'jobs'),
+    getObjectValue(pageProps, 'jobResults'),
+    getObjectValue(pageProps, 'results'),
+    getObjectValue(getObjectValue(pageProps, 'searchResults'), 'jobs'),
+    getObjectValue(getObjectValue(pageProps, 'searchResults'), 'results'),
 );
 
 const extractPageCursors = (pageProps) => (
-    pageProps?.pageCursors
-    || pageProps?.pagination?.pageCursors
-    || pageProps?.searchResults?.pageCursors
+    getObjectValue(pageProps, 'pageCursors')
+    || getObjectValue(getObjectValue(pageProps, 'pagination'), 'pageCursors')
+    || getObjectValue(getObjectValue(pageProps, 'searchResults'), 'pageCursors')
     || null
 );
 
 const extractCurrentPage = (pageProps, fallbackPage) => {
     const candidate = Number(
-        pageProps?.currentPageNumber
-        ?? pageProps?.pagination?.currentPage
-        ?? pageProps?.searchResults?.currentPage
+        getObjectValue(pageProps, 'currentPageNumber')
+        ?? getObjectValue(getObjectValue(pageProps, 'pagination'), 'currentPage')
+        ?? getObjectValue(getObjectValue(pageProps, 'searchResults'), 'currentPage')
     );
     return Number.isFinite(candidate) && candidate > 0 ? candidate : fallbackPage;
 };
 
-const fetchWithRetries = async ({
-    url,
-    referer,
-    proxyState,
-    sessionId,
-    acceptJson = false,
-    maxAttempts = 4,
-}) => {
-    let lastError;
-    let activeSession = sessionId;
-    const proxy = proxyState;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        let proxyUrl;
-        try {
-            if (proxy?.enabled && proxy.configuration) {
-                proxyUrl = await proxy.configuration.newUrl(activeSession);
-            }
-
-            const response = await gotScraping({
-                url,
-                proxyUrl,
-                headers: createHeaders({ referer, acceptJson }),
-                timeout: { request: 20000 },
-                throwHttpErrors: false,
-                retry: { limit: 0 },
-                http2: true,
-            });
-
-            const body = response.body?.toString?.() || '';
-            const htmlWhenJsonExpected = acceptJson && isHtmlResponse(body, response.headers);
-            const blocked = isBlockedStatus(response.statusCode)
-                || (!acceptJson && isBlockContent(body))
-                || htmlWhenJsonExpected;
-
-            if (htmlWhenJsonExpected) {
-                log.warning(`Expected JSON but received HTML for ${url}. Retrying with a fresh session.`);
-            }
-
-            if (!blocked || response.statusCode === 404) {
-                if (proxy?.enabled && proxyUrl) proxy.failures = 0;
-                return {
-                    statusCode: response.statusCode,
-                    body,
-                    headers: response.headers,
-                };
-            }
-
-            lastError = new Error(`Blocked with status ${response.statusCode}`);
-            if (proxy?.enabled && proxyUrl) {
-                proxy.failures += 1;
-                if (proxy.failures >= 3) {
-                    proxy.enabled = false;
-                    log.warning('Disabling proxy after repeated blocked responses. Continuing without proxy.');
-                }
-            }
-        } catch (error) {
-            lastError = error;
-            if (proxy?.enabled && isProxyError(error)) {
-                proxy.failures += 1;
-                if (proxy.failures >= 2) {
-                    proxy.enabled = false;
-                    log.warning(`Disabling proxy after repeated proxy failures: ${error.message}`);
-                }
-            }
-        }
-
-        if (attempt < maxAttempts) {
-            activeSession = `retry_${Date.now()}_${randomBetween(1000, 9999)}`;
-            await sleep(randomBetween(450 * attempt, 1000 * attempt));
-        }
-    }
-
-    throw lastError || new Error(`Request failed: ${url}`);
-};
-
 const getNextDataPayloadFromHtml = (html) => {
     const $ = loadHtml(html);
-    const raw = $('#__NEXT_DATA__').text();
+    const raw = $('#__NEXT_DATA__').text() || $('[id]').filter((_, element) => (
+        String($(element).attr('id')).toLowerCase() === '__next_data__'
+    )).first().text();
     if (raw) {
         const parsed = tryParseJson(raw).data;
         if (parsed) return parsed;
@@ -370,6 +365,107 @@ const getNextDataPayloadFromHtml = (html) => {
         log.warning('Found __NEXT_DATA__ script but JSON parsing failed.');
     }
     return parsed;
+};
+
+const fetchWithRetries = async ({
+    url,
+    referer,
+    proxyState,
+    sessionId,
+    acceptJson = false,
+    maxAttempts = 4,
+    quietRetries = true,
+}) => {
+    let lastError;
+    let activeSession = sessionId;
+    const proxy = proxyState;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        let proxyUrl;
+        try {
+            if (proxy?.enabled && proxy.configuration) {
+                proxyUrl = await proxy.configuration.newUrl(activeSession);
+            }
+
+            const client = getImpitClient(proxyUrl, attempt === 1 ? '' : activeSession);
+            const response = await client.fetch(url, {
+                headers: {
+                    referer: referer || `${BASE_URL}/`,
+                },
+                signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+                redirect: 'follow',
+            });
+
+            const body = await response.text();
+            const headers = Object.fromEntries(response.headers.entries());
+            const statusCode = response.status;
+            const htmlWhenJsonExpected = acceptJson && isHtmlResponse(body, headers);
+            const blocked = isBlockedStatus(statusCode)
+                || (!acceptJson && isBlockContent(body))
+                || htmlWhenJsonExpected;
+
+            if (htmlWhenJsonExpected) {
+                const htmlPayload = getNextDataPayloadFromHtml(body);
+                if (htmlPayload) {
+                    log.debug(`Parsed __NEXT_DATA__ HTML fallback for ${url}.`);
+                    if (proxy?.enabled && proxyUrl) proxy.failures = 0;
+                    return {
+                        statusCode,
+                        body: JSON.stringify(htmlPayload),
+                        headers,
+                    };
+                }
+
+                log.debug(`Expected JSON but received HTML for ${url}. Retrying with a fresh session.`);
+            }
+
+            if (!blocked && !isRetryableStatus(statusCode)) {
+                if (proxy?.enabled && proxyUrl) proxy.failures = 0;
+                return {
+                    statusCode,
+                    body,
+                    headers,
+                };
+            }
+
+            if (statusCode === 404) {
+                if (proxy?.enabled && proxyUrl) proxy.failures = 0;
+                return {
+                    statusCode,
+                    body,
+                    headers,
+                };
+            }
+
+            lastError = Object.assign(new Error(`Temporary request failure with status ${statusCode}`), { headers });
+            if (proxy?.enabled && proxyUrl) {
+                proxy.failures += 1;
+            }
+        } catch (error) {
+            lastError = error;
+            if (proxy?.enabled && isProxyError(error)) {
+                proxy.failures += 1;
+                if (proxy.failures >= 2 && !Actor.isAtHome()) {
+                    proxy.enabled = false;
+                    log.warning(`Disabling proxy after repeated proxy failures: ${error.message}`);
+                }
+            }
+        }
+
+        if (attempt < maxAttempts) {
+            activeSession = `retry_${Date.now()}_${randomBetween(1000, 9999)}`;
+            const retryAfterMs = parseRetryAfterMs(lastError?.headers || {});
+            const retryDelayMs = retryAfterMs || randomBetween(500 * attempt, 1200 * attempt);
+            if (quietRetries) {
+                log.debug(`Retrying request after ${Math.round(retryDelayMs)}ms (${attempt}/${maxAttempts}) for ${url}`);
+            } else {
+                log.warning(`Retrying request after ${Math.round(retryDelayMs)}ms (${attempt}/${maxAttempts}) for ${url}`);
+            }
+            await sleep(retryDelayMs);
+        }
+    }
+
+    throw lastError || new Error(`Request failed: ${url}`);
 };
 
 const decodeJobPathFromEncodedUrl = (encodedUrl) => {
@@ -391,18 +487,23 @@ const decodeJobPathFromEncodedUrl = (encodedUrl) => {
 const normalizeListJob = (rawJob, sourceSearchUrl) => {
     if (!rawJob || typeof rawJob !== 'object') return null;
 
-    const jobPath = rawJob.botUrl || decodeJobPathFromEncodedUrl(rawJob.encodedUrl) || '';
-    const salaryRaw = rawJob.salaryInfo;
-    const requirements = toUniqueArray(rawJob.requirements);
-    const uncategorized = toUniqueArray(rawJob.uncategorized);
+    const jobPath = getObjectValue(rawJob, 'botUrl', 'url')
+        || decodeJobPathFromEncodedUrl(getObjectValue(rawJob, 'encodedUrl'))
+        || '';
+    const salaryRaw = getObjectValue(rawJob, 'salaryInfo', 'salary');
+    const requirements = toUniqueArray(getObjectValue(rawJob, 'requirements'));
+    const uncategorized = toUniqueArray(getObjectValue(rawJob, 'uncategorized'));
     const skills = toUniqueArray([...uncategorized, ...requirements]);
-    const snippet = cleanText(rawJob.snippet);
+    const snippet = cleanText(getObjectValue(rawJob, 'snippet', 'summary'));
+    const benefits = getObjectValue(rawJob, 'benefits');
+    const jobTypes = getObjectValue(rawJob, 'jobTypes', 'jobType');
+    const remoteAttributes = getObjectValue(rawJob, 'remoteAttributes');
 
     return {
-        job_key: cleanText(rawJob.jobKey),
-        title: cleanText(rawJob.title),
-        company: cleanText(rawJob.company),
-        location: cleanText(rawJob.location),
+        job_key: cleanText(getObjectValue(rawJob, 'jobKey')),
+        title: cleanText(getObjectValue(rawJob, 'title')),
+        company: cleanText(getObjectValue(rawJob, 'company')),
+        location: cleanText(getObjectValue(rawJob, 'location')),
         salary: cleanText(typeof salaryRaw === 'string' ? salaryRaw : ''),
         snippet,
         description_text: snippet,
@@ -410,14 +511,16 @@ const normalizeListJob = (rawJob, sourceSearchUrl) => {
         summary: snippet,
         requirements,
         skills,
-        benefits: Array.isArray(rawJob.benefits) ? rawJob.benefits : [],
-        job_type: Array.isArray(rawJob.jobTypes) ? rawJob.jobTypes.join(', ') : '',
-        remote_attributes: Array.isArray(rawJob.remoteAttributes) ? rawJob.remoteAttributes : [],
-        sponsored: Boolean(rawJob.sponsored),
-        company_rating: Number.isFinite(Number(rawJob.companyRating)) ? Number(rawJob.companyRating) : null,
-        date_posted: toIsoFromMs(rawJob.dateOnIndeed),
+        benefits: Array.isArray(benefits) ? benefits : [],
+        job_type: Array.isArray(jobTypes) ? jobTypes.join(', ') : cleanText(jobTypes),
+        remote_attributes: Array.isArray(remoteAttributes) ? remoteAttributes : [],
+        sponsored: Boolean(getObjectValue(rawJob, 'sponsored')),
+        company_rating: Number.isFinite(Number(getObjectValue(rawJob, 'companyRating')))
+            ? Number(getObjectValue(rawJob, 'companyRating'))
+            : null,
+        date_posted: toIsoFromMs(getObjectValue(rawJob, 'dateOnIndeed', 'datePosted')),
         url: absoluteUrl(jobPath || ''),
-        company_page_url: absoluteUrl(rawJob.companyPageUrl || ''),
+        company_page_url: absoluteUrl(getObjectValue(rawJob, 'companyPageUrl') || ''),
         source_search_url: sourceSearchUrl,
     };
 };
@@ -452,7 +555,15 @@ const buildSearchJsonUrl = (buildId, searchUrl, cursor) => {
     const source = new URL(searchUrl, BASE_URL);
     const jsonUrl = new URL(`${BASE_URL}/_next/data/${buildId}/search.json`);
 
-    source.searchParams.forEach((value, key) => jsonUrl.searchParams.append(key, value));
+    const keyword = getSearchParam(source.searchParams, 'q');
+    const location = getSearchParam(source.searchParams, 'l');
+    if (keyword) jsonUrl.searchParams.set('q', keyword);
+    if (location) jsonUrl.searchParams.set('l', location);
+    source.searchParams.forEach((value, key) => {
+        const lowerKey = key.toLowerCase();
+        if (['cursor', 'l', 'q'].includes(lowerKey)) return;
+        jsonUrl.searchParams.append(key, value);
+    });
     if (cursor) jsonUrl.searchParams.set('cursor', cursor);
     else jsonUrl.searchParams.delete('cursor');
 
@@ -511,6 +622,52 @@ const selectLongestCandidate = (candidates) => {
     return candidates.sort((a, b) => cleanText(b).length - cleanText(a).length)[0] || null;
 };
 
+const sanitizeDescriptionHtml = (value) => {
+    const raw = (value || '').toString().trim();
+    if (!raw) return '';
+
+    if (!/<[^>]+>/.test(raw)) {
+        return `<p>${escapeHtml(raw)}</p>`;
+    }
+
+    const $ = loadHtml(raw, null, false);
+    $('script,style,noscript,iframe,svg,canvas,form,input,button,select,textarea,link,meta').remove();
+
+    let changed = true;
+    while (changed) {
+        changed = false;
+        for (const element of $('*').toArray()) {
+            const tagName = element.tagName?.toLowerCase();
+            if (!tagName) continue;
+
+            if (ALLOWED_DESCRIPTION_TAGS.has(tagName)) {
+                for (const attribute of Object.keys(element.attribs || {})) {
+                    $(element).removeAttr(attribute);
+                }
+                continue;
+            }
+
+            changed = true;
+            const contents = $(element).contents();
+            if (['article', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section'].includes(tagName)) {
+                const wrapper = $('<p></p>');
+                wrapper.append(contents);
+                $(element).replaceWith(wrapper);
+            } else {
+                $(element).replaceWith(contents);
+            }
+        }
+    }
+
+    $('p').each((_, element) => {
+        if (!cleanText($(element).text()) && !$(element).find('br').length) {
+            $(element).remove();
+        }
+    });
+
+    return ($.root().html() || '').trim();
+};
+
 const toDescriptionPair = (candidate, fallbackSnippet) => {
     const fallbackText = cleanText(fallbackSnippet);
     const fallbackHtml = fallbackText ? `<p>${escapeHtml(fallbackText)}</p>` : '';
@@ -520,8 +677,8 @@ const toDescriptionPair = (candidate, fallbackSnippet) => {
 
     const raw = candidate.toString();
     const hasHtml = /<[^>]+>/.test(raw);
-    const descriptionHtml = hasHtml ? raw : `<p>${escapeHtml(raw)}</p>`;
-    const descriptionText = cleanText(hasHtml ? loadHtml(raw).text() : raw);
+    const descriptionHtml = sanitizeDescriptionHtml(raw);
+    const descriptionText = cleanText(hasHtml ? loadHtml(descriptionHtml).text() : raw);
 
     if (descriptionText) {
         return { descriptionText, descriptionHtml };
@@ -569,11 +726,9 @@ const enrichJobLongDescription = async ({ job, buildId, startUrl, proxyState }) 
             const { data: parsed } = tryParseJson(response.body);
             if (parsed) {
                 const pageProps = getPageProps(parsed) || {};
-                const directDescription = pageProps.jobDescriptionHtml
-                    || pageProps?.job?.jobDescriptionHtml
-                    || pageProps?.job?.descriptionHtml
-                    || pageProps?.job?.description
-                    || pageProps?.jobDescription;
+                const jobData = getObjectValue(pageProps, 'job') || {};
+                const directDescription = getObjectValue(pageProps, 'jobDescriptionHtml', 'jobDescription')
+                    || getObjectValue(jobData, 'jobDescriptionHtml', 'descriptionHtml', 'description');
                 const scanned = selectLongestCandidate(pickDescriptionCandidates(parsed));
                 bestCandidate = directDescription || scanned;
             }
@@ -606,7 +761,7 @@ const scrapeSearch = async ({
         proxyState,
         sessionId: bootstrapSession,
         acceptJson: false,
-        maxAttempts: 5,
+        maxAttempts: 8,
     });
 
     if (bootstrap.statusCode >= 400) {
@@ -627,7 +782,7 @@ const scrapeSearch = async ({
     let noProgressPages = 0;
     const progress = state;
 
-    log.info(`Search bootstrap OK. buildId=${buildId}, startPage=${currentPage}, startUrl=${startUrl}`);
+    log.debug(`Search bootstrap OK. buildId=${buildId}, startPage=${currentPage}, startUrl=${startUrl}`);
 
     while (pagesFetched < maxPages && progress.saved < maxJobs) {
         pagesFetched += 1;
@@ -675,12 +830,25 @@ const scrapeSearch = async ({
             noProgressPages += 1;
         }
 
-        log.info([
-            `Page ${currentPage} processed`,
-            `jobsInPage=${listJobs.length}`,
-            `newJobs=${uniqueJobs.length}`,
-            `savedTotal=${progress.saved}/${maxJobs}`,
-        ].join(' | '));
+        if (
+            pagesFetched === 1
+            || progress.saved >= maxJobs
+            || pagesFetched % PAGE_PROGRESS_LOG_INTERVAL === 0
+        ) {
+            log.info([
+                `Page ${currentPage} processed`,
+                `jobsInPage=${listJobs.length}`,
+                `newJobs=${uniqueJobs.length}`,
+                `savedTotal=${progress.saved}/${maxJobs}`,
+            ].join(' | '));
+        } else {
+            log.debug([
+                `Page ${currentPage} processed`,
+                `jobsInPage=${listJobs.length}`,
+                `newJobs=${uniqueJobs.length}`,
+                `savedTotal=${progress.saved}/${maxJobs}`,
+            ].join(' | '));
+        }
 
         if (progress.saved >= maxJobs) break;
         if (noProgressPages >= 3) {
@@ -724,7 +892,6 @@ const scrapeSearch = async ({
 
         pageProps = nextPageProps;
         currentPage = extractCurrentPage(pageProps, currentPage + 1);
-        await sleep(randomBetween(120, 320));
     }
 };
 
@@ -735,19 +902,17 @@ try {
     const input = isNonEmptyObject(actorInput) ? actorInput : await loadLocalFallbackInput();
     const normalizedInput = {
         ...input,
-        keyword: cleanText(input.keyword) || DEFAULT_KEYWORD,
-        location: cleanText(input.location) || DEFAULT_LOCATION,
+        keyword: cleanText(input.keyword),
+        location: cleanText(input.location),
     };
 
-    const maxJobs = Number(normalizedInput.results_wanted ?? 20);
-    const maxPages = Number(input.max_pages ?? Math.max(10, Math.ceil(maxJobs / 20) + 5));
-
-    if (!Number.isFinite(maxJobs) || maxJobs < 1) {
-        throw new Error('Input "results_wanted" must be an integer >= 1.');
-    }
-    if (!Number.isFinite(maxPages) || maxPages < 1) {
-        throw new Error('Input "max_pages" must be an integer >= 1.');
-    }
+    const maxJobs = toPositiveInteger(normalizedInput.results_wanted, 20, 'results_wanted');
+    const requestedMaxPages = toPositiveInteger(
+        normalizedInput.max_pages,
+        Math.max(10, Math.ceil(maxJobs / 20) + 5),
+        'max_pages',
+    );
+    const maxPages = getPageBudget(requestedMaxPages, maxJobs);
 
     const startUrls = getStartUrls(normalizedInput);
     if (!startUrls.length) {
@@ -772,14 +937,18 @@ try {
 
     for (const startUrl of startUrls) {
         if (state.saved >= maxJobs) break;
-        await scrapeSearch({
-            startUrl,
-            maxPages,
-            maxJobs,
-            proxyState,
-            seenJobs,
-            state,
-        });
+        try {
+            await scrapeSearch({
+                startUrl,
+                maxPages,
+                maxJobs,
+                proxyState,
+                seenJobs,
+                state,
+            });
+        } catch (error) {
+            log.warning(`Skipping failed search URL ${startUrl}: ${error.message}`);
+        }
     }
 
     if (state.saved === 0) {

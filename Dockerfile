@@ -5,7 +5,9 @@ FROM apify/actor-node:22
 COPY package*.json ./
 
 # Install production dependencies
-RUN npm install --omit=dev --omit=optional \
+RUN npm --quiet set progress=false \
+    && npm install --omit=dev \
+    && node -e "import('impit').then(m => console.log('impit OK:', Object.keys(m)))" \
     && npm cache clean --force \
     && rm -rf /tmp/*
 

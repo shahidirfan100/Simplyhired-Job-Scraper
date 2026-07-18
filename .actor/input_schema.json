@@ -37,7 +37,7 @@
     "max_pages": {
       "title": "Maximum pages",
       "type": "integer",
-      "description": "Maximum number of pagination pages to visit (used as a hard safety cap).",
+      "description": "Minimum pagination page budget. The actor may continue past this when needed to reach results_wanted, up to an internal safety cap.",
       "default": 2,
       "prefill": 2,
       "editor": "number"
