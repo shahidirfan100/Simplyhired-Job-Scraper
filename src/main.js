@@ -13,16 +13,60 @@ const RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const ALLOWED_DESCRIPTION_TAGS = new Set(['p', 'br', 'strong', 'b', 'em', 'i', 'ul', 'ol', 'li']);
 const impitClients = new Map();
 
-const getImpitClient = (proxyUrl, sessionKey = '') => {
-    const key = proxyUrl || sessionKey || 'direct';
+const cookieStore = {};
+const IMPIT_COOKIE_JAR = {
+    getCookieString: async (url) => {
+        try {
+            const domain = new URL(url).hostname;
+            return Object.entries(cookieStore)
+                .filter(([k]) => k.startsWith(`${domain}:`))
+                .map(([, v]) => v.split(';')[0])
+                .join('; ');
+        } catch { return ''; }
+    },
+    setCookie: async (cookie, url) => {
+        if (!cookie) return;
+        const name = cookie.split('=')[0].trim();
+        const domain = new URL(url).hostname;
+        cookieStore[`${domain}:${name}`] = cookie;
+    },
+};
+
+const CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+const CHROME_SEC_CH_UA = '"Not/A)Brand";v="99", "Google Chrome";v="126", "Chromium";v="126"';
+const getHtmlHeaders = (referer) => ({
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': referer ? 'same-origin' : 'none',
+    'Upgrade-Insecure-Requests': '1',
+    ...(referer ? { Referer: referer } : {}),
+});
+const getJsonHeaders = (referer) => ({
+    Accept: 'application/json, text/plain, */*',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-origin',
+    Referer: referer || 'https://www.simplyhired.com/',
+});
+
+const getImpitClient = (proxyUrl) => {
+    const key = proxyUrl || 'direct';
     if (!impitClients.has(key)) {
         impitClients.set(key, new Impit({
             browser: 'chrome',
             ignoreTlsErrors: true,
             ...(proxyUrl && { proxyUrl }),
+            cookieJar: IMPIT_COOKIE_JAR,
+            headers: {
+                'User-Agent': CHROME_UA,
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Sec-Ch-Ua': CHROME_SEC_CH_UA,
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"Windows"',
+            },
         }));
     }
-
     return impitClients.get(key);
 };
 
@@ -387,11 +431,9 @@ const fetchWithRetries = async ({
                 proxyUrl = await proxy.configuration.newUrl(activeSession);
             }
 
-            const client = getImpitClient(proxyUrl, attempt === 1 ? '' : activeSession);
+            const client = getImpitClient(proxyUrl);
             const response = await client.fetch(url, {
-                headers: {
-                    referer: referer || `${BASE_URL}/`,
-                },
+                headers: acceptJson ? getJsonHeaders(referer) : getHtmlHeaders(referer),
                 signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
                 redirect: 'follow',
             });
@@ -453,7 +495,7 @@ const fetchWithRetries = async ({
         }
 
         if (attempt < maxAttempts) {
-            activeSession = `retry_${Date.now()}_${randomBetween(1000, 9999)}`;
+            activeSession = `session_${randomBetween(100000, 999999)}`;
             const retryAfterMs = parseRetryAfterMs(lastError?.headers || {});
             const retryDelayMs = retryAfterMs || randomBetween(500 * attempt, 1200 * attempt);
             if (quietRetries) {
@@ -717,7 +759,7 @@ const enrichJobLongDescription = async ({ job, buildId, startUrl, proxyState }) 
             url: buildDetailJsonUrl(buildId, job.job_key),
             referer: startUrl,
             proxyState,
-            sessionId: `detail_${job.job_key.slice(0, 10)}_${randomBetween(1000, 9999)}`,
+            sessionId: `detail_${job.job_key.slice(0, 8)}_${randomBetween(100, 999)}`,
             acceptJson: true,
             maxAttempts: 3,
         });
@@ -754,7 +796,7 @@ const scrapeSearch = async ({
     seenJobs,
     state,
 }) => {
-    const bootstrapSession = `bootstrap_${Date.now()}_${randomBetween(1000, 9999)}`;
+    const bootstrapSession = `init_${randomBetween(100000, 999999)}`;
     const bootstrap = await fetchWithRetries({
         url: startUrl,
         referer: `${BASE_URL}/`,
@@ -864,11 +906,12 @@ const scrapeSearch = async ({
 
         usedCursors.add(nextCursor);
         const nextPageUrl = buildSearchJsonUrl(buildId, startUrl, nextCursor);
+        await sleep(randomBetween(200, 600));
         const nextResponse = await fetchWithRetries({
             url: nextPageUrl,
             referer: startUrl,
             proxyState,
-            sessionId: `list_${Date.now()}_${randomBetween(1000, 9999)}`,
+            sessionId: `page_${randomBetween(100000, 999999)}`,
             acceptJson: true,
             maxAttempts: 4,
         });
@@ -934,6 +977,17 @@ try {
         `proxy=${proxyState.enabled ? 'enabled' : 'disabled'}`,
         `startUrls=${startUrls.length}`,
     ].join(' | '));
+
+    try {
+        log.debug('Establishing session via homepage...');
+        const warmupClient = getImpitClient(null);
+        await warmupClient.fetch(BASE_URL, {
+            headers: getHtmlHeaders(),
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+            redirect: 'follow',
+        });
+        await sleep(randomBetween(800, 1500));
+    } catch { /* non-critical */ }
 
     for (const startUrl of startUrls) {
         if (state.saved >= maxJobs) break;
