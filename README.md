@@ -1,93 +1,102 @@
-# SimplyHired Jobs Scraper
+## What does SimplyHired Jobs Scraper do?
 
-Extract job listings from SimplyHired for recruiting research, market tracking, lead generation, and hiring analysis. This SimplyHired Jobs Scraper collects structured job data such as titles, companies, locations, salary text, descriptions, skills, benefits, ratings, job URLs, and posting metadata in a fast, automated workflow.
+SimplyHired Jobs Scraper collects public job listings from SimplyHired by keyword, location, or one or more prepared SimplyHired search URLs. It saves structured job records with titles, companies, locations, salary text, descriptions, skills, benefits, work arrangements, posting dates, and direct job links.
 
-Use it to gather job market data by keyword and location, or start from one or more SimplyHired search URLs. The actor is built for repeatable collection, scheduled monitoring, and clean exports that can be used in spreadsheets, dashboards, CRMs, and data pipelines.
+Use the dataset for recruiting research, hiring market analysis, lead generation, compensation research, job board monitoring, and scheduled reports. Results can be downloaded in common formats or connected to spreadsheets, alerts, dashboards, and other business workflows through Apify.
 
-## Features
+## Why use SimplyHired Jobs Scraper?
 
-- **Keyword and location search** - Collect jobs by role, skill, company type, city, state, country, or remote location.
-- **Direct search URL support** - Provide SimplyHired search URLs when you already know the exact pages you want to collect.
-- **Rich job records** - Gather job titles, company names, locations, salary text, descriptions, requirements, benefits, and links.
-- **Automatic pagination** - Continue through search result pages until the requested result count or page limit is reached.
-- **Duplicate reduction** - Avoid repeated listings using stable job identifiers and URLs.
-- **Analysis-ready output** - Export structured datasets for business reporting, hiring intelligence, and research.
+- **Build hiring datasets** - Collect current SimplyHired listings without manually copying job cards into a spreadsheet.
+- **Search by role and geography** - Compare demand for a job title, skill, company type, city, state, country, or remote work.
+- **Capture useful job context** - Review descriptions, requirements, benefits, employment type, remote attributes, salary text, and company ratings when published.
+- **Support recruiting and sales research** - Identify companies that are hiring now and organize their open roles for sourcing or outreach.
+- **Monitor changes over time** - Schedule repeat runs with the same searches to track new listings, hiring volume, salary signals, and skill demand.
+- **Use automation-ready output** - Export the dataset or connect it to Google Sheets, Airtable, webhooks, Make, Zapier, or your own application.
 
----
+## What data can you extract from SimplyHired?
 
-## Use Cases
+| Field | Type | Description |
+|-------|------|-------------|
+| `job_key` | String | SimplyHired job identifier when available. |
+| `title` | String | Job title as published in the listing. |
+| `company` | String | Hiring company name. |
+| `location` | String | Location shown for the job. |
+| `salary` | String | Salary or compensation text when published. |
+| `snippet` | String | Short preview from the search result. |
+| `summary` | String | Listing summary text. |
+| `description_html` | String | Job description with basic formatting when available. |
+| `description_text` | String | Plain-text job description. |
+| `requirements` | Array | Requirement terms found in the listing. |
+| `skills` | Array | Skills and related terms associated with the role. |
+| `benefits` | Array | Benefits listed by the employer when available. |
+| `job_type` | String | Employment type, such as full-time or part-time. |
+| `remote_attributes` | Array | Remote, hybrid, or other workplace attributes. |
+| `sponsored` | Boolean | Whether the listing is marked as sponsored. |
+| `company_rating` | Number | Company rating when SimplyHired provides one. |
+| `date_posted` | String | Posting date in ISO timestamp format when available. |
+| `url` | String | Direct job listing URL. |
+| `company_page_url` | String | Company page URL when available. |
+| `source_search_url` | String | SimplyHired search URL that produced the listing. |
+| `source` | String | Source label, returned as `SimplyHired`. |
+| `scraped_at` | String | ISO timestamp for when the record was saved. |
 
-### Recruiting Market Research
+Some fields are optional because employers do not publish the same information for every job. Missing salary, benefits, rating, or remote details normally means that the source listing did not provide them.
 
-Track hiring demand for specific roles across different locations. Recruiters and analysts can compare job volume, skills, salary signals, and remote work trends across markets.
+## How to scrape SimplyHired jobs
 
-### Lead Generation
+1. Open SimplyHired Jobs Scraper in Apify Console.
+2. Enter a `keyword` and `location`, or add one or more public SimplyHired search URLs in `startUrls`.
+3. Set `results_wanted` to the maximum number of jobs you need.
+4. Adjust `max_pages` when you need broader pagination coverage.
+5. Run the Actor, review the dataset preview, and download or connect the results.
 
-Find companies that are actively hiring in your target industry. Hiring activity can help sales, staffing, and partnership teams prioritize accounts with current business needs.
-
-### Compensation and Skills Analysis
-
-Collect job descriptions, salary text, requirements, and skill terms for workforce planning. Use the dataset to identify common qualifications, benefit patterns, and role expectations.
-
-### Job Board Monitoring
-
-Run scheduled searches for important keywords and locations. Build alerts, trend reports, or dashboards that show new job activity over time.
-
-### Competitive Hiring Intelligence
-
-Monitor how competitors describe roles, where they are hiring, and which skills they request. This helps teams understand talent demand and positioning in the labor market.
-
----
+When `startUrls` is supplied, the Actor uses those search pages instead of building a search from `keyword` and `location`. For a first run, the default keyword, location, result limit, and page limit are suitable for a small validation dataset.
 
 ## Input Parameters
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `startUrls` | Array | No | None | One or more SimplyHired search URLs. If provided, these are used instead of keyword and location search. |
-| `keyword` | String | No | `software engineer` | Job search keyword, such as `data analyst`, `registered nurse`, or `sales manager`. |
+| `startUrls` | Array | No | None | One or more public SimplyHired search URLs. These take precedence over keyword and location search. |
+| `keyword` | String | No | `software engineer` | Job title, skill, or search phrase, such as `data analyst`, `registered nurse`, or `sales manager`. |
 | `location` | String | No | `USA` | Search location, such as `Remote`, `New York, NY`, `Los Angeles`, or `United States`. |
 | `results_wanted` | Integer | No | `20` | Maximum number of job listings to save. |
-| `max_pages` | Integer | No | `2` | Minimum pagination page budget. The actor may continue past this to reach `results_wanted`, up to an internal safety cap. |
-| `proxyConfiguration` | Object | No | `useApifyProxy: true` | Proxy settings for reliable Apify Cloud runs. |
-
----
+| `max_pages` | Integer | No | `2` | Minimum pagination page budget. The Actor can continue when additional pages are needed to reach `results_wanted`, subject to its safety limit. |
+| `proxyConfiguration` | Object | No | `{ "useApifyProxy": false }` | Optional Apify Proxy settings for runs that need proxy routing. |
 
 ## Output Data
 
-Each dataset item can include:
+Each dataset item represents one SimplyHired job listing. The Actor removes duplicate listings during a run and adds source and collection-time metadata to saved records.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `job_key` | String | Unique job identifier when available. |
+| `job_key` | String | Stable job key when available. |
 | `title` | String | Job title. |
-| `company` | String | Hiring company name. |
-| `location` | String | Job location shown in the listing. |
-| `salary` | String | Salary text when published. |
-| `snippet` | String | Short listing preview. |
-| `summary` | String | Listing summary text. |
-| `description_html` | String | Job description with formatting when available. |
-| `description_text` | String | Plain text job description. |
-| `requirements` | Array | Requirement terms from the listing. |
-| `skills` | Array | Skills and related terms found in listing metadata. |
-| `benefits` | Array | Benefits listed by the employer when available. |
-| `job_type` | String | Employment type, such as full-time or part-time. |
-| `remote_attributes` | Array | Remote, hybrid, or related work attributes. |
-| `sponsored` | Boolean | Whether the listing is marked as sponsored. |
-| `company_rating` | Number | Company rating when provided. |
-| `date_posted` | String | Posting date in timestamp format when available. |
-| `url` | String | Direct job listing URL. |
+| `company` | String | Employer name. |
+| `location` | String | Published job location. |
+| `salary` | String | Published salary text, if available. |
+| `snippet` | String | Search result preview. |
+| `summary` | String | Summary text from the listing. |
+| `description_html` | String | Formatted description when available. |
+| `description_text` | String | Plain-text description for analysis and indexing. |
+| `requirements` | Array | Requirement terms. |
+| `skills` | Array | Skills and related terms. |
+| `benefits` | Array | Employer-provided benefits. |
+| `job_type` | String | Employment type. |
+| `remote_attributes` | Array | Remote or hybrid attributes. |
+| `sponsored` | Boolean | Sponsored-listing flag. |
+| `company_rating` | Number | Company rating, if published. |
+| `date_posted` | String | ISO posting timestamp when available. |
+| `url` | String | Direct job URL. |
 | `company_page_url` | String | Company page URL when available. |
-| `source_search_url` | String | Search URL where the listing was found. |
-| `source` | String | Source label. |
-| `scraped_at` | String | Collection timestamp. |
-
----
+| `source_search_url` | String | Search page used to find the job. |
+| `source` | String | `SimplyHired`. |
+| `scraped_at` | String | ISO collection timestamp. |
 
 ## Usage Examples
 
-### Basic Job Search
+### Basic keyword search
 
-Collect 20 software engineering jobs in the United States:
+Collect 20 software engineering jobs in the United States.
 
 ```json
 {
@@ -98,22 +107,9 @@ Collect 20 software engineering jobs in the United States:
 }
 ```
 
-### Remote Role Search
+### Multiple SimplyHired search URLs
 
-Collect remote data analyst jobs:
-
-```json
-{
-  "keyword": "data analyst",
-  "location": "Remote",
-  "results_wanted": 50,
-  "max_pages": 5
-}
-```
-
-### Direct Search URLs
-
-Start from specific SimplyHired search pages:
+Collect jobs from two prepared searches in one run.
 
 ```json
 {
@@ -130,26 +126,26 @@ Start from specific SimplyHired search pages:
 }
 ```
 
-### Proxy-Assisted Run
+### Larger remote hiring dataset
 
-Use proxy settings for repeated or larger collection jobs:
+Collect a larger set of remote data analyst jobs and route requests through an Apify residential proxy group.
 
 ```json
 {
-  "keyword": "registered nurse",
-  "location": "Texas",
+  "keyword": "data analyst",
+  "location": "Remote",
   "results_wanted": 100,
   "max_pages": 10,
   "proxyConfiguration": {
     "useApifyProxy": true,
-    "apifyProxyGroups": ["RESIDENTIAL"]
+    "groups": ["RESIDENTIAL"]
   }
 }
 ```
 
----
-
 ## Sample Output
+
+The following example shows one realistic dataset item. Optional fields can be empty when SimplyHired does not publish the corresponding value.
 
 ```json
 {
@@ -177,100 +173,78 @@ Use proxy settings for repeated or larger collection jobs:
 }
 ```
 
----
-
 ## Tips for Best Results
 
-### Start With QA-Sized Runs
-
-- Use `results_wanted: 20` when testing a new query.
-- Increase `results_wanted` after confirming the search returns relevant listings.
-- Keep `max_pages` reasonable; the actor can extend the page budget when more pages are needed to reach `results_wanted`.
-
-### Use Specific Search Terms
-
-- Prefer clear role names such as `backend engineer`, `warehouse associate`, or `marketing manager`.
-- Add seniority, tools, or certifications when you need a narrower dataset.
-- Use broad keywords only when you want market-wide coverage.
-
-### Choose Useful Locations
-
-- Use city and state names for local hiring research.
-- Use `Remote` for remote job tracking.
-- Use country-level searches for broad market analysis.
-
-### Review Missing Fields Correctly
-
-- Some employers do not publish salary, benefits, ratings, or full remote details.
-- Empty fields usually mean the listing did not provide that information.
-- Compare several runs before drawing conclusions from a small sample.
-
----
+- **Start with a small run** - Use `results_wanted: 20` to confirm that a query returns the roles and locations you need.
+- **Use specific keywords** - Terms such as `backend engineer`, `warehouse associate`, or `marketing manager` usually produce more focused results.
+- **Add seniority or skills** - Include terms such as `senior`, `entry level`, `Python`, or `registered nurse` when you need a narrower dataset.
+- **Choose locations carefully** - Use city and state names for local research, `Remote` for remote hiring, and country names for broad comparisons.
+- **Increase page coverage when needed** - Raise `max_pages` for larger datasets. The run can stop early after it reaches `results_wanted`.
+- **Expect source-dependent fields** - Salary, benefits, company ratings, and full descriptions may not be available for every employer.
+- **Keep scheduled searches consistent** - Reusing the same keyword, location, and page settings makes trend comparisons easier.
 
 ## Integrations
 
-Connect your data with:
-
-- **Google Sheets** - Review and share job datasets with teams.
-- **Airtable** - Build searchable recruiting and company databases.
-- **Slack** - Send notifications when scheduled runs finish.
-- **Webhooks** - Deliver new job data to internal systems.
-- **Make** - Create no-code workflows from completed runs.
-- **Zapier** - Trigger follow-up actions in sales and recruiting tools.
+- **Google Sheets** - Review, filter, and share job datasets with recruiting or research teams.
+- **Airtable** - Build a searchable hiring tracker with company and role fields.
+- **Webhooks** - Send completed-run notifications or dataset events to another service.
+- **Make or Zapier** - Trigger alerts, enrichment, or CRM workflows from new runs.
+- **API** - Access datasets programmatically from your own applications.
 
 ### Export Formats
 
-- **JSON** - Use in applications, APIs, and data pipelines.
-- **CSV** - Open in spreadsheets and business intelligence tools.
-- **Excel** - Share structured reports with non-technical teams.
-- **XML** - Send data to systems that require XML imports.
-
----
+| Format | Useful for |
+|--------|------------|
+| JSON | Applications, APIs, and data pipelines |
+| CSV | Spreadsheet analysis and bulk review |
+| Excel | Business reports and shared workbooks |
+| XML | Systems that require XML imports |
 
 ## Frequently Asked Questions
 
 ### Can I scrape SimplyHired by keyword and location?
 
-Yes, you can scrape SimplyHired by entering a `keyword` and `location`. The actor builds the search from those values and collects matching job listings.
+Yes. Set `keyword` and `location` to build a SimplyHired search automatically. Use a prepared search URL in `startUrls` when you need to reuse an existing search page.
 
 ### Can I use my own SimplyHired search URLs?
 
-Yes, you can provide one or more URLs in `startUrls`. This is useful when you have already created a filtered search on SimplyHired.
+Yes. Add one or more request objects containing a `url` in `startUrls`. When this field is present, those URLs take precedence over the keyword and location inputs.
 
 ### How many jobs can I collect in one run?
 
-You can set `results_wanted` to the number of jobs you need. The final count also depends on available listings, pagination limits, and source availability.
+Set `results_wanted` to the maximum number of listings you want. The final count also depends on how many matching public listings are available and how much pagination is needed.
 
-### Why are salary or benefits sometimes missing?
+### Why are salary, benefits, or ratings missing?
 
-Salary and benefits can be missing because employers do not always publish those details. The actor leaves unavailable fields empty instead of inventing values.
+Those fields are missing when the employer or SimplyHired does not publish them for a listing. The Actor keeps the available source data and does not infer unavailable values.
 
-### Does this actor remove duplicate jobs?
+### Does the Actor remove duplicate jobs?
 
-Yes, the actor reduces duplicate records by tracking job identifiers and URLs during a run. This helps keep the dataset cleaner for analysis.
+Yes. Listings are checked using their job identifiers or URLs during a run so repeated search results are less likely to create duplicate dataset records.
 
-### Is this scraper suitable for scheduled monitoring?
+### Can I run SimplyHired monitoring on a schedule?
 
-Yes, this scraper works well for scheduled monitoring. You can run the same search daily or weekly and export the results for trend tracking.
+Yes. Create an Apify schedule for hourly, daily, weekly, or custom recurring runs, then compare the resulting datasets or send them to a downstream workflow.
 
-### What proxy settings should I use?
+### Can I export SimplyHired data to CSV or Excel?
 
-For small tests, the default proxy setting is often enough. For repeated or larger runs, Apify Proxy with residential groups can improve reliability.
+Yes. Apify datasets can be downloaded as JSON, CSV, Excel, XML, and other supported formats.
 
----
+### Is it legal to scrape SimplyHired?
+
+Public data collection may be subject to laws, privacy requirements, and SimplyHired terms. You are responsible for using this Actor lawfully, respecting access rules, and collecting only data you are allowed to use.
+
+## Related Actors
+
+- [APEC Jobs Scraper](https://apify.com/shahidirfan/apec-jobs-scraper) - Collect French executive and specialist job listings.
+- [BuiltIn Jobs Scraper](https://apify.com/shahidirfan/builtin-jobs-scraper) - Collect technology and startup job listings.
+- [Learn4Good Job Scraper](https://apify.com/shahidirfan/learn4good-job-scraper) - Collect worldwide, teaching, and career listings.
+- [AiJobs.net Scraper](https://apify.com/shahidirfan/aijobs-net-scraper) - Collect AI, machine learning, and data job listings.
 
 ## Support
 
-For issues, questions, or feature requests, use the support options available in the Apify Console.
-
-### Resources
-
-- [Apify Documentation](https://docs.apify.com/)
-- [Apify API Reference](https://docs.apify.com/api/v2)
-- [Scheduling Runs](https://docs.apify.com/platform/schedules)
-
----
+For issues, feature requests, or questions about the dataset, use the Issues tab on the Actor page or contact the developer through Apify.
 
 ## Legal Notice
 
-This actor is designed for legitimate data collection, research, and analysis. You are responsible for following SimplyHired terms, applicable laws, privacy rules, and data-use obligations. Collect only the data you are allowed to use, and apply reasonable limits to automated runs.
+This Actor is intended for legitimate recruitment research, market analysis, monitoring, and other responsible data workflows. Users are responsible for complying with SimplyHired terms, applicable laws, privacy requirements, and data-use obligations.
