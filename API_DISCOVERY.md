@@ -41,6 +41,10 @@
 
 ## Auto-Healing and Resilience Notes
 - Actor dynamically reads `buildId` from live `__NEXT_DATA__` on every run (no hardcoded build id).
+- A cloud run with Apify Proxy returned HTTP 403 on all four bootstrap attempts while reusing one sticky session. Bootstrap and list requests now rotate to a fresh proxy session after a 403; the successful session is reused for later requests, while network and 5xx retries keep the current session. Each cached Impit client has its own cookie jar, and concurrent detail requests do not mutate the shared session.
+- The search-page bootstrap is the first request; there is no separate direct homepage warm-up that can establish cookies on a different route.
+- Impit supplies the selected Chrome profile's fingerprint headers instead of combining a generated profile with manually pinned version headers.
+- Supplied `startUrls` are authoritative and are not expanded with schema-default keyword or location searches.
 - Cursor pagination uses adaptive cursor selection and duplicate-cursor protection.
 - Response parsing now supports multiple `pageProps` shapes (`pageProps`, `props.pageProps`, `data.pageProps`).
 - Job array extraction supports fallback keys (`jobs`, `jobResults`, `results`, nested search result arrays).

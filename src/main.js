@@ -13,27 +13,27 @@ const RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const ALLOWED_DESCRIPTION_TAGS = new Set(['p', 'br', 'strong', 'b', 'em', 'i', 'ul', 'ol', 'li']);
 const impitClients = new Map();
 
-const cookieStore = {};
-const IMPIT_COOKIE_JAR = {
-    getCookieString: async (url) => {
-        try {
+const createImpitCookieJar = () => {
+    const cookieStore = {};
+    return {
+        getCookieString: async (url) => {
+            try {
+                const domain = new URL(url).hostname;
+                return Object.entries(cookieStore)
+                    .filter(([key]) => key.startsWith(`${domain}:`))
+                    .map(([, value]) => value.split(';')[0])
+                    .join('; ');
+            } catch { return ''; }
+        },
+        setCookie: async (cookie, url) => {
+            if (!cookie) return;
+            const name = cookie.split('=')[0].trim();
             const domain = new URL(url).hostname;
-            return Object.entries(cookieStore)
-                .filter(([k]) => k.startsWith(`${domain}:`))
-                .map(([, v]) => v.split(';')[0])
-                .join('; ');
-        } catch { return ''; }
-    },
-    setCookie: async (cookie, url) => {
-        if (!cookie) return;
-        const name = cookie.split('=')[0].trim();
-        const domain = new URL(url).hostname;
-        cookieStore[`${domain}:${name}`] = cookie;
-    },
+            cookieStore[`${domain}:${name}`] = cookie;
+        },
+    };
 };
 
-const CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
-const CHROME_SEC_CH_UA = '"Not/A)Brand";v="99", "Google Chrome";v="126", "Chromium";v="126"';
 const getHtmlHeaders = (referer) => ({
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Sec-Fetch-Dest': 'document',
@@ -55,15 +55,10 @@ const getImpitClient = (proxyUrl) => {
     if (!impitClients.has(key)) {
         impitClients.set(key, new Impit({
             browser: 'chrome',
-            ignoreTlsErrors: true,
             ...(proxyUrl && { proxyUrl }),
-            cookieJar: IMPIT_COOKIE_JAR,
+            cookieJar: createImpitCookieJar(),
             headers: {
-                'User-Agent': CHROME_UA,
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Sec-Ch-Ua': CHROME_SEC_CH_UA,
-                'Sec-Ch-Ua-Mobile': '?0',
-                'Sec-Ch-Ua-Platform': '"Windows"',
             },
         }));
     }
@@ -74,6 +69,14 @@ const sleep = (ms) => new Promise((resolve) => {
     setTimeout(resolve, ms);
 });
 const randomBetween = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
+const createSessionId = () => `run_${Date.now()}_${randomBetween(100000, 999999)}`;
+const createSessionState = () => {
+    let id = createSessionId();
+    return {
+        get id() { return id; },
+        rotate() { id = createSessionId(); },
+    };
+};
 const cleanText = (value) => (value || '').toString().replace(/\s+/g, ' ').trim();
 const escapeHtml = (value) => value
     .replaceAll('&', '&amp;')
@@ -197,22 +200,6 @@ const normalizeSearchUrl = (value) => {
     }
 };
 
-const buildSearchUrlFallbacks = (url, input) => {
-    const normalized = normalizeSearchUrl(url);
-    if (!normalized) return [];
-
-    const parsed = new URL(normalized);
-    const keyword = cleanText(getSearchParam(parsed.searchParams, 'q') || input.keyword);
-    const location = cleanText(getSearchParam(parsed.searchParams, 'l') || input.location);
-    const out = [normalized];
-
-    if (keyword || location) {
-        out.push(buildSearchUrl(keyword, location));
-    }
-
-    return out;
-};
-
 const isNonEmptyObject = (value) => (
     Boolean(value)
     && typeof value === 'object'
@@ -252,17 +239,21 @@ const getStartUrls = (input) => {
     } else if (input.startUrls) {
         startUrlItems = [input.startUrls];
     }
-    const provided = startUrlItems
+    const provided = [...new Set(startUrlItems
         .map((item) => (typeof item === 'string' ? item : item?.url))
-        .flatMap((url) => buildSearchUrlFallbacks(url, input))
-        .filter(Boolean);
+        .map(normalizeSearchUrl)
+        .filter(Boolean))];
 
-    if (startUrlItems.length && !provided.length) {
-        log.warning('No valid SimplyHired start URLs found in input. Falling back to keyword/location search.');
+    if (startUrlItems.length) {
+        if (!provided.length) {
+            log.warning('No valid SimplyHired start URLs found in input.');
+        }
+        return provided;
     }
 
-    if (provided.length) {
-        return [...new Set(provided)];
+    if (!input.keyword && !input.location) {
+        log.warning('No keyword, location, or valid start URL was provided.');
+        return [];
     }
 
     return [buildSearchUrl(input.keyword, input.location)];
@@ -415,20 +406,21 @@ const fetchWithRetries = async ({
     url,
     referer,
     proxyState,
-    sessionId,
+    session,
     acceptJson = false,
     maxAttempts = 4,
     quietRetries = true,
+    rotateProxySessionOnBlock = false,
 }) => {
     let lastError;
-    let activeSession = sessionId;
     const proxy = proxyState;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         let proxyUrl;
+        let rotatedProxySession = false;
         try {
             if (proxy?.enabled && proxy.configuration) {
-                proxyUrl = await proxy.configuration.newUrl(activeSession);
+                proxyUrl = await proxy.configuration.newUrl(session.id);
             }
 
             const client = getImpitClient(proxyUrl);
@@ -448,7 +440,7 @@ const fetchWithRetries = async ({
 
             if (htmlWhenJsonExpected) {
                 const htmlPayload = getNextDataPayloadFromHtml(body);
-                if (htmlPayload) {
+                if (statusCode < 400 && htmlPayload && getPageProps(htmlPayload)) {
                     log.debug(`Parsed __NEXT_DATA__ HTML fallback for ${url}.`);
                     if (proxy?.enabled && proxyUrl) proxy.failures = 0;
                     return {
@@ -458,7 +450,7 @@ const fetchWithRetries = async ({
                     };
                 }
 
-                log.debug(`Expected JSON but received HTML for ${url}. Retrying with a fresh session.`);
+                log.debug(`Expected valid JSON but received HTML for ${url}; retrying if the response is recoverable.`);
             }
 
             if (!blocked && !isRetryableStatus(statusCode)) {
@@ -483,6 +475,10 @@ const fetchWithRetries = async ({
             if (proxy?.enabled && proxyUrl) {
                 proxy.failures += 1;
             }
+            if (statusCode === 403 && rotateProxySessionOnBlock && proxy?.enabled && proxy.configuration) {
+                session.rotate();
+                rotatedProxySession = true;
+            }
         } catch (error) {
             lastError = error;
             if (proxy?.enabled && isProxyError(error)) {
@@ -495,13 +491,13 @@ const fetchWithRetries = async ({
         }
 
         if (attempt < maxAttempts) {
-            activeSession = `session_${randomBetween(100000, 999999)}`;
             const retryAfterMs = parseRetryAfterMs(lastError?.headers || {});
             const retryDelayMs = retryAfterMs || randomBetween(500 * attempt, 1200 * attempt);
+            const sessionNote = rotatedProxySession ? ' with a fresh proxy session after HTTP 403' : '';
             if (quietRetries) {
-                log.debug(`Retrying request after ${Math.round(retryDelayMs)}ms (${attempt}/${maxAttempts}) for ${url}`);
+                log.debug(`Retrying request after ${Math.round(retryDelayMs)}ms (${attempt}/${maxAttempts})${sessionNote} for ${url}`);
             } else {
-                log.warning(`Retrying request after ${Math.round(retryDelayMs)}ms (${attempt}/${maxAttempts}) for ${url}`);
+                log.warning(`Retrying request after ${Math.round(retryDelayMs)}ms (${attempt}/${maxAttempts})${sessionNote} for ${url}`);
             }
             await sleep(retryDelayMs);
         }
@@ -749,7 +745,7 @@ const runPool = async (items, concurrency, handler) => {
     return results;
 };
 
-const enrichJobLongDescription = async ({ job, buildId, startUrl, proxyState }) => {
+const enrichJobLongDescription = async ({ job, buildId, startUrl, proxyState, session }) => {
     if (!job.job_key) return job;
 
     try {
@@ -759,7 +755,7 @@ const enrichJobLongDescription = async ({ job, buildId, startUrl, proxyState }) 
             url: buildDetailJsonUrl(buildId, job.job_key),
             referer: startUrl,
             proxyState,
-            sessionId: `detail_${job.job_key.slice(0, 8)}_${randomBetween(100, 999)}`,
+            session,
             acceptJson: true,
             maxAttempts: 3,
         });
@@ -795,15 +791,17 @@ const scrapeSearch = async ({
     proxyState,
     seenJobs,
     state,
+    session,
 }) => {
-    const bootstrapSession = `init_${randomBetween(100000, 999999)}`;
     const bootstrap = await fetchWithRetries({
         url: startUrl,
         referer: `${BASE_URL}/`,
         proxyState,
-        sessionId: bootstrapSession,
+        session,
         acceptJson: false,
-        maxAttempts: 8,
+        maxAttempts: 4,
+        quietRetries: false,
+        rotateProxySessionOnBlock: true,
     });
 
     if (bootstrap.statusCode >= 400) {
@@ -856,6 +854,7 @@ const scrapeSearch = async ({
                 buildId,
                 startUrl,
                 proxyState,
+                session,
             }));
 
             const withMeta = enrichedJobs.map((job) => ({
@@ -911,9 +910,11 @@ const scrapeSearch = async ({
             url: nextPageUrl,
             referer: startUrl,
             proxyState,
-            sessionId: `page_${randomBetween(100000, 999999)}`,
+            session,
             acceptJson: true,
             maxAttempts: 4,
+            quietRetries: false,
+            rotateProxySessionOnBlock: true,
         });
 
         if (nextResponse.statusCode >= 400) {
@@ -942,7 +943,13 @@ await Actor.init();
 
 try {
     const actorInput = (await Actor.getInput()) ?? {};
-    const input = isNonEmptyObject(actorInput) ? actorInput : await loadLocalFallbackInput();
+    let input = actorInput;
+    if (!isNonEmptyObject(input)) {
+        input = {};
+        if (!Actor.isAtHome()) {
+            input = await loadLocalFallbackInput();
+        }
+    }
     const normalizedInput = {
         ...input,
         keyword: cleanText(input.keyword),
@@ -968,6 +975,7 @@ try {
         saved: 0,
     };
     const seenJobs = new Set();
+    const session = createSessionState();
 
     log.info([
         'Starting SimplyHired actor',
@@ -978,16 +986,6 @@ try {
         `startUrls=${startUrls.length}`,
     ].join(' | '));
 
-    try {
-        log.debug('Establishing session via homepage...');
-        const warmupClient = getImpitClient(null);
-        await warmupClient.fetch(BASE_URL, {
-            headers: getHtmlHeaders(),
-            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-            redirect: 'follow',
-        });
-        await sleep(randomBetween(800, 1500));
-    } catch { /* non-critical */ }
 
     for (const startUrl of startUrls) {
         if (state.saved >= maxJobs) break;
@@ -999,6 +997,7 @@ try {
                 proxyState,
                 seenJobs,
                 state,
+                session,
             });
         } catch (error) {
             log.warning(`Skipping failed search URL ${startUrl}: ${error.message}`);

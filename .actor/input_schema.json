@@ -23,15 +23,13 @@
       "type": "string",
       "description": "Geographic location for job search (e.g., 'New York, NY', 'Los Angeles', 'Remote').",
       "editor": "textfield",
-      "default": "USA",
-      "prefill": "USA"
+      "default": "USA"
     },
     "results_wanted": {
       "title": "Maximum jobs to scrape",
       "type": "integer",
       "description": "Maximum number of job listings to collect.",
       "default": 20,
-      "prefill": 20,
       "editor": "number"
     },
     "max_pages": {
@@ -39,7 +37,6 @@
       "type": "integer",
       "description": "Minimum pagination page budget. The actor may continue past this when needed to reach results_wanted, up to an internal safety cap.",
       "default": 2,
-      "prefill": 2,
       "editor": "number"
     },
     "proxyConfiguration": {
